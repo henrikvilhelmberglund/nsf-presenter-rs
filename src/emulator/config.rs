@@ -10,6 +10,7 @@ starting_octave = 0
 waveform_height = 48
 oscilloscope_glow_thickness = 2.0
 oscilloscope_line_thickness = 0.75
+outline_thickness = 1
 "###;
 
 pub const REQUIRED_CONFIG: &str = r###"
