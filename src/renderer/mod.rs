@@ -64,12 +64,14 @@ impl Renderer {
     }
 
     pub fn start_encoding(&mut self) -> Result<()> {
-        self.encode_start = Instant::now();
-        self.video.start_encoding()?;
+
 
         // Run for a frame and clear the audio buffer to prevent the pop during initialization
-        self.emulator.step();
-        self.emulator.clear_sample_buffer();
+        // self.emulator.step();
+        // self.emulator.clear_sample_buffer();
+
+        self.encode_start = Instant::now();
+        self.video.start_encoding()?;
 
         Ok(())
     }
