@@ -17,8 +17,8 @@ panic = "abort"
 [dependencies]
 rusticnes-core = { path = "external/rusticnes-core" }
 rusticnes-ui-common = { path = "external/rusticnes-ui-common" }
-ffmpeg-next = "6.1.0"
-ffmpeg-sys-next = "6.1.0"
+ffmpeg-next = "7.1.0"
+ffmpeg-sys-next = "7.1.0"
 clap = "4.2.1"
 indicatif = "0.17.7"
 image = "0.19.0"
