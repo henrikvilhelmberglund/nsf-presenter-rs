@@ -5,6 +5,7 @@ use ffmpeg_next::{Dictionary, frame, Packet};
 use crate::video_builder::ffmpeg_hacks::ffmpeg_context_bytes_written;
 use super::vb_unwrap::VideoBuilderUnwrap;
 use super::VideoBuilder;
+use anyhow::anyhow;
 
 fn copy_data_to_frame(frame: &mut frame::Video, data: &[u8]) -> Result<()> {
     if data.len() == frame.data(0).len() {
@@ -93,22 +94,67 @@ impl VideoBuilder {
         }
     }
 
-    pub fn push_audio_data(&mut self, audio: &[u8]) -> Result<()> {
-        let bytes_per_sample = self.a_swr_ctx.input().channel_layout.channels() as usize * self.a_swr_ctx.input().format.bytes();
-        let samples = audio.len() / bytes_per_sample;
+// In your push_audio_data method, replace the filter section with:
+pub fn push_audio_data(&mut self, audio: &[u8]) -> Result<()> {
+    let channels = self.a_swr_ctx.input().channel_layout.channels() as usize;
+    let bytes_per_sample_per_channel = self.a_swr_ctx.input().format.bytes();
+    let bytes_per_sample = channels * bytes_per_sample_per_channel;
+    let samples = audio.len() / bytes_per_sample;
 
-        let mut input_frame = frame::Audio::new(self.a_swr_ctx.input().format, samples, self.a_swr_ctx.input().channel_layout);
-        input_frame.set_rate(self.options.sample_rate as _);
-        input_frame.data_mut(0)[..audio.len()].copy_from_slice(audio);
-
-        let mut output_frame = frame::Audio::new(self.a_swr_ctx.output().format, samples, self.a_swr_ctx.output().channel_layout);
-        output_frame.set_rate(self.options.sample_rate as _);
-        self.a_swr_ctx.run(&input_frame, &mut output_frame).vb_unwrap()?;
-
-        self.a_frame_buf.push_back(output_frame);
-
-        Ok(())
+    // Validate input data length
+    if audio.len() % bytes_per_sample != 0 {
+        return Err(anyhow!("Audio data length {} is not a multiple of bytes per sample {}", audio.len(), bytes_per_sample));
     }
+
+    let mut input_frame = frame::Audio::new(self.a_swr_ctx.input().format, samples, self.a_swr_ctx.input().channel_layout);
+    input_frame.set_rate(self.options.sample_rate as _);
+    // Set PTS based on samples processed so far
+    // let pts = (self.a_samples_processed * self.options.audio_time_base.denominator() as i64) / self.options.sample_rate as i64;
+    input_frame.set_pts(Some(self.a_samples_processed));
+
+    if input_frame.is_planar() {
+        // For planar formats, deinterleave the interleaved audio into separate planes
+        for ch in 0..channels {
+            let plane = input_frame.data_mut(ch);
+            for i in 0..samples {
+                let src_idx = (i * channels + ch) * bytes_per_sample_per_channel;
+                plane[i * bytes_per_sample_per_channel..(i + 1) * bytes_per_sample_per_channel]
+                    .copy_from_slice(&audio[src_idx..src_idx + bytes_per_sample_per_channel]);
+            }
+        }
+    } else {
+        // For packed formats, copy the interleaved data directly
+        input_frame.data_mut(0)[..audio.len()].copy_from_slice(audio);
+    }
+
+    let mut output_frame = frame::Audio::new(self.a_swr_ctx.output().format, samples, self.a_swr_ctx.output().channel_layout);
+    output_frame.set_rate(self.options.sample_rate as _);
+    // output_frame.set_pts(Some(self.a_pts)); // Set PTS on output frame
+    output_frame.set_pts(Some(self.a_samples_processed));
+    self.a_swr_ctx.run(&input_frame, &mut output_frame).vb_unwrap()?;
+
+    // Send frame to filter graph
+    self.a_filter_graph
+        .get("in").ok_or(anyhow!("missing 'in' filter"))?
+        .source()
+        .add(&output_frame)?;
+
+    // Process all available filtered frames
+    let mut filtered_frame = ffmpeg_next::frame::Audio::empty();
+    while let Ok(()) = self.a_filter_graph
+        .get("out").ok_or(anyhow!("missing 'out' filter"))?
+        .sink()
+        .frame(&mut filtered_frame)
+    {
+        // Set proper PTS on filtered frame
+        self.a_samples_processed += samples as i64;
+        filtered_frame.set_pts(Some(self.a_samples_processed));
+        self.a_frame_buf.push_back(filtered_frame.clone());
+        filtered_frame = ffmpeg_next::frame::Audio::empty();
+        // Update the total samples processed
+      }
+    Ok(())
+}
 
     fn send_video_to_encoder(&mut self) -> Result<()> {
         if let Some(mut frame) = self.v_frame_buf.pop_front() {
@@ -140,11 +186,13 @@ impl VideoBuilder {
     }
 
     fn send_audio_to_encoder(&mut self) -> Result<()> {
-        if let Some(mut frame) = self.a_frame_buf.pop_front() {
-            frame.set_pts(Some(self.a_pts));
+        if let Some(frame) = self.a_frame_buf.pop_front() {
+            // The frame should already have the correct PTS from the filter
+            // println!("Sending audio frame with PTS: {:?}", frame.pts());
+            
             self.a_encoder.send_frame(&frame).vb_unwrap()?;
 
-            self.a_pts += self.a_encoder.frame_size() as i64;
+            // self.a_pts += self.a_encoder.frame_size() as i64;
         }
 
         Ok(())
@@ -152,6 +200,7 @@ impl VideoBuilder {
 
     fn mux_audio_frame(&mut self, packet: &mut Packet) -> Result<bool> {
         if self.a_encoder.receive_packet(packet).is_ok() {
+            // println!("Received audio packet");
             let out_time_base = self.out_ctx.stream(self.a_stream_idx)
                 .unwrap()
                 .time_base();
@@ -204,22 +253,38 @@ impl VideoBuilder {
     }
 
     pub fn finish_encoding(&mut self) -> Result<()> {
-        self.v_encoder.send_eof().vb_unwrap()?;
-        self.a_encoder.send_eof().vb_unwrap()?;
+    // Send EOF to filter graph first
+    if let Some(mut filter) = self.a_filter_graph.get("in") {
+        filter.source().close(0)?; // Close the input pad
+    }
+    
+    // Drain any remaining frames from filter
+    let mut filtered_frame = ffmpeg_next::frame::Audio::empty();
+    while let Ok(()) = self.a_filter_graph
+        .get("out").ok_or(anyhow!("missing 'out' filter"))?
+        .sink()
+        .frame(&mut filtered_frame)
+    {
+        self.a_frame_buf.push_back(filtered_frame.clone());
+        filtered_frame = ffmpeg_next::frame::Audio::empty();
+    }
 
-        let mut packet = Packet::empty();
-        loop {
-            let muxed_audio = self.mux_audio_frame(&mut packet)?;
-            let muxed_video = self.mux_video_frame(&mut packet)?;
+    self.v_encoder.send_eof().vb_unwrap()?;
+    self.a_encoder.send_eof().vb_unwrap()?;
 
-            if !muxed_audio && !muxed_video {
-                break;
-            }
+    let mut packet = Packet::empty();
+    loop {
+        let muxed_audio = self.mux_audio_frame(&mut packet)?;
+        let muxed_video = self.mux_video_frame(&mut packet)?;
+
+        if !muxed_audio && !muxed_video {
+            break;
         }
+    }
 
-        self.out_ctx.write_trailer().vb_unwrap()?;
+    self.out_ctx.write_trailer().vb_unwrap()?;
 
-        Ok(())
+    Ok(())
     }
 
     pub fn audio_frame_size(&self) -> usize {

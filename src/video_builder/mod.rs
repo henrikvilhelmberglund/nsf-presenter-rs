@@ -14,6 +14,7 @@ use vb_unwrap::VideoBuilderUnwrap;
 use backgrounds::{get_video_background, VideoBackground};
 use ffmpeg_hacks::{ffmpeg_copy_codec_params, ffmpeg_copy_context_params, ffmpeg_create_context, ffmpeg_sample_format_from_string, ffmpeg_get_audio_context_frame_size};
 pub use ffmpeg_hacks::ffmpeg_version;
+use ffmpeg_next::filter;
 
 pub fn init() -> Result<()> {
     ffmpeg_next::init().context("Initializing FFmpeg")
@@ -49,7 +50,10 @@ pub struct VideoBuilder {
     a_stream_idx: usize,
     a_frame_size: usize,
     a_pts: i64,
-    a_pts_muxed: i64
+    a_pts_muxed: i64,
+    a_samples_processed: i64, // Add this new field
+
+    a_filter_graph: ffmpeg_next::filter::Graph,
 }
 
 impl VideoBuilder {
@@ -124,6 +128,8 @@ impl VideoBuilder {
         );
         let a_swr_ctx = software::resampler(swr_in, swr_out).vb_unwrap()?;
 
+        let a_filter_graph = Self::create_audio_filter_graph(&options, channel_layout)?;
+
         let (v_encoder, v_stream_idx) = Self::create_video_encoder(options.clone(), &mut out_ctx)?;
         let (a_encoder, a_stream_idx, a_frame_size) = Self::create_audio_encoder(options.clone(), &mut out_ctx)?;
 
@@ -144,9 +150,42 @@ impl VideoBuilder {
             a_stream_idx,
             a_frame_size,
             a_pts: 0,
-            a_pts_muxed: 0
+            a_pts_muxed: 0,
+            a_samples_processed: 0, // Initialize to 0
+            a_filter_graph,
         })
     }
+
+    // In your VideoBuilder::new method, update the filter graph setup:
+fn create_audio_filter_graph(options: &VideoOptions, channel_layout: ChannelLayout) -> Result<filter::Graph> {
+    let mut a_filter_graph = filter::Graph::new();
+    
+    let output_format = ffmpeg_sample_format_from_string(&options.sample_format_out);
+    
+    // More detailed filter arguments with proper time base
+    let args = format!(
+        "time_base={}/{}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
+        options.audio_time_base.0,
+        options.audio_time_base.1,
+        options.sample_rate,
+        output_format.name(),
+        channel_layout.bits()
+    );
+
+    // Create filter nodes
+    let mut abuffer = a_filter_graph.add(&filter::find("abuffer").unwrap(), "in", &args)?;
+    let mut afade = a_filter_graph.add(&filter::find("afade").unwrap(), "fade", "type=in:start_time=0:nb_samples=2650")?;
+    let mut abuffersink = a_filter_graph.add(&filter::find("abuffersink").unwrap(), "out", "")?;
+
+    // Link them
+    abuffer.link(0, &mut afade, 0);
+    afade.link(0, &mut abuffersink, 0);
+
+    // Configure the graph
+    a_filter_graph.validate()?;
+
+    Ok(a_filter_graph)
+}
 
     fn create_video_encoder(options: VideoOptions, out_ctx: &mut format::context::Output) -> Result<(encoder::Video, usize)> {
         let global_header = out_ctx.format().flags().contains(format::Flags::GLOBAL_HEADER);
@@ -183,8 +222,9 @@ impl VideoBuilder {
         match codec.id() {
             codec::Id::H264 | codec::Id::H265 => {
                 context_options.set("preset", "veryfast");
-                context_options.set("crf", "20");
+                context_options.set("crf", "18");
                 context_options.set("tune", "film");
+                // context_options.set("vf", "select='gte(n\\, 3)'");
             },
             _ => ()
         };
@@ -214,10 +254,14 @@ impl VideoBuilder {
 
         context.set_rate(options.sample_rate);
         context.set_format(output_format);
-        context.set_channels(options.audio_channels);
+        // context.set_channels(options.audio_channels);
         context.set_channel_layout(channel_layout);
         context.set_time_base(options.audio_time_base);
         context.set_bit_rate(192_000);  // TODO make configurable
+
+        // println!("Audio encoder format: {:?}", context.format());
+        // println!("Audio encoder channels: {}", context.channels());
+        // println!("Audio encoder sample rate: {}", context.rate());
 
         ffmpeg_copy_codec_params(&mut stream, &context, &codec)?;
 
