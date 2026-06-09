@@ -1,0 +1,30 @@
+[package]
+name = "nsf-presenter"
+version = "0.6.1"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "nsf-presenter"
+path = "src/main.rs"
+
+[dependencies]
+nsf-common = { path = "../nsf-common" }
+rusticnes-core = { path = "../../external/rusticnes-core" }
+rusticnes-ui-common = { path = "../../external/rusticnes-ui-common" }
+ffmpeg-next = "7.1.0"
+ffmpeg-sys-next = "7.1.0"
+clap = "4.2.1"
+indicatif = "0.17.7"
+image = "0.19.0"
+build-time = "0.1.3"
+slint = "1.3.2"
+native-dialog = "0.6.3"
+anyhow = "1.0.75"
+csscolorparser = "0.6.2"
+
+[build-dependencies]
+slint-build = "1.3.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

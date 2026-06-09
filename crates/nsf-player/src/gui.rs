@@ -1,36 +1,48 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use native_dialog::FileDialog;
-use slint::{ComponentHandle, Image, Model, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak};
+use native_dialog::{FileDialog, MessageDialog, MessageType};
+use slint::{
+    ComponentHandle, Image, Model, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel,
+    Weak,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::player::player_thread::{
+use nsf_common::player::player_thread::{
     blank_frame, spawn as spawn_player, LatestFrame, PlayerEvent, PlayerHandle, PlayerRequest,
     PLAYER_CANVAS_H, PLAYER_CANVAS_W,
 };
-use crate::player::playlist::{Playlist, PlaylistItem};
+use nsf_common::player::playlist::{Playlist, PlaylistItem};
 
-use super::{PlayerWindow, PlaylistRow, VisualizationWindow};
+// `slint::include_modules!()` picks up the *last* compile()'d slint file via
+// SLINT_INCLUDE_GENERATED — that's visualization.slint per build.rs. The other
+// generated file (player.rs) is included explicitly below, scoped in a private
+// module to avoid colliding on shared names like `TextStyle`.
+slint::include_modules!();
+mod player_slint {
+    include!(concat!(env!("OUT_DIR"), "/player.rs"));
+}
+use player_slint::{PlayerWindow, PlaylistRow};
 
-/// Open the player. Creates the controls window and the visualization window
-/// together. Returns immediately; both windows run on the shared Slint event
-/// loop.
-pub fn open_player_window() -> Result<()> {
+pub fn run() {
+    if let Err(e) = open_player_window() {
+        display_error_dialog(&format!("Failed to start player: {}", e));
+    }
+}
+
+fn open_player_window() -> Result<()> {
     let player_w = PlayerWindow::new().context("Failed to create PlayerWindow")?;
     let viz_w = VisualizationWindow::new().context("Failed to create VisualizationWindow")?;
-    let state = Rc::new(RefCell::new(PlayerWindowState::new(
-        viz_w.as_weak(),
-    )?));
+    let state = Rc::new(RefCell::new(PlayerWindowState::new(viz_w.as_weak())?));
 
-    wire_callbacks(&player_w, &viz_w, &state);
-    install_frame_timer(&player_w, &viz_w, &state);
+    wire_callbacks(&player_w, &state);
+    install_status_timer(&player_w, &state);
     install_event_pump(&player_w, &state);
 
-    // Closing the player window terminates the player and closes the viz.
+    // Closing the player window terminates the player + closes viz + exits.
     {
         let state = state.clone();
         let viz_weak = viz_w.as_weak();
@@ -39,12 +51,14 @@ pub fn open_player_window() -> Result<()> {
                 let _ = viz.hide();
             }
             state.borrow_mut().shutdown();
+            // Exit the event loop so main() returns.
+            let _ = slint::quit_event_loop();
             slint::CloseRequestResponse::HideWindow
         });
     }
 
-    // Closing the visualization window just hides it — the player keeps
-    // playing and the user can re-open via the toolbar.
+    // Closing the visualization just hides it — the player keeps playing
+    // and the user can re-open it from the toolbar.
     {
         let state = state.clone();
         viz_w.window().on_close_requested(move || {
@@ -53,26 +67,25 @@ pub fn open_player_window() -> Result<()> {
         });
     }
 
-    // Reflect initial visualization state on the player toolbar.
     player_w.set_visualization_visible(true);
 
     player_w.show().context("Failed to show player window")?;
     viz_w.show().context("Failed to show visualization window")?;
 
-    // Keep both windows + state alive on the Slint event loop.
-    let _keep_alive = Box::leak(Box::new((player_w, viz_w, state)));
+    slint::run_event_loop().context("Slint event loop failed")?;
+
+    // Drop everything once the event loop returns.
+    drop(state);
+    drop(player_w);
+    drop(viz_w);
     Ok(())
 }
 
 struct PlayerWindowState {
     player: Option<PlayerHandle>,
     playlist: Playlist,
-    /// Weak handle to the visualization window so we can show/hide it from
-    /// callbacks. Upgrades fail after the window is dropped on shutdown.
     viz_weak: Weak<VisualizationWindow>,
     visualization_visible: bool,
-    /// Buffer used to receive events from the player thread. The player thread
-    /// pushes into the mutex; the Slint timer drains it and updates the UI.
     event_queue: Arc<Mutex<Vec<PlayerEvent>>>,
 }
 
@@ -81,12 +94,6 @@ impl PlayerWindowState {
         let event_queue: Arc<Mutex<Vec<PlayerEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let event_queue_thread = event_queue.clone();
 
-        // Push-based frame updates. The player thread calls `on_new_frame`
-        // after every produced NES frame, which schedules a UI update on
-        // the Slint event loop. A coalescing flag prevents the event loop
-        // from getting back-logged if the GUI ever falls behind — only one
-        // update is in flight at a time, and the closure always reads the
-        // most recent frame from arc-swap.
         let latest_frame: Arc<LatestFrame> = Arc::new(ArcSwap::from_pointee(blank_frame()));
         let pending = Arc::new(AtomicBool::new(false));
 
@@ -95,7 +102,7 @@ impl PlayerWindowState {
         let viz_weak_cb = viz_weak.clone();
         let on_new_frame = move || {
             if pending_cb.swap(true, Ordering::Acquire) {
-                return; // a render is already scheduled
+                return;
             }
             let latest = latest_frame_cb.clone();
             let pending_inner = pending_cb.clone();
@@ -140,12 +147,7 @@ impl PlayerWindowState {
     }
 }
 
-fn wire_callbacks(
-    window: &PlayerWindow,
-    _viz: &VisualizationWindow,
-    state: &Rc<RefCell<PlayerWindowState>>,
-) {
-    // Add files
+fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>) {
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -180,7 +182,6 @@ fn wire_callbacks(
         });
     }
 
-    // Add folder
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -205,7 +206,6 @@ fn wire_callbacks(
         });
     }
 
-    // Clear
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -216,7 +216,6 @@ fn wire_callbacks(
         });
     }
 
-    // Play / Pause toggle
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -232,7 +231,6 @@ fn wire_callbacks(
         });
     }
 
-    // Next / Prev
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -258,7 +256,6 @@ fn wire_callbacks(
         });
     }
 
-    // Direct playlist click → play that index
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -272,7 +269,6 @@ fn wire_callbacks(
         });
     }
 
-    // Volume
     {
         let state = state.clone();
         window.on_set_volume(move |v| {
@@ -281,7 +277,6 @@ fn wire_callbacks(
         });
     }
 
-    // Repeat toggle
     {
         let state = state.clone();
         window.on_toggle_repeat(move |checked| {
@@ -289,7 +284,6 @@ fn wire_callbacks(
         });
     }
 
-    // Show / hide visualization window
     {
         let weak = window.as_weak();
         let state = state.clone();
@@ -310,17 +304,11 @@ fn wire_callbacks(
     }
 }
 
-fn install_frame_timer(
-    player_w: &PlayerWindow,
-    _viz_w: &VisualizationWindow,
-    state: &Rc<RefCell<PlayerWindowState>>,
-) {
+fn install_status_timer(player_w: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>) {
     let player_weak = player_w.as_weak();
     let state = state.clone();
     let last_underruns: Cell<u64> = Cell::new(u64::MAX);
 
-    // Frame updates are push-driven via on_new_frame in PlayerWindowState
-    // — this timer only refreshes the underrun count in the status bar.
     let timer = Box::leak(Box::new(Timer::default()));
     timer.start(
         TimerMode::Repeated,
@@ -352,7 +340,6 @@ fn build_image(frame: &Arc<Vec<u8>>) -> Image {
     Image::from_rgba8(buf)
 }
 
-/// Drain events from the player thread on the Slint thread and update UI state.
 fn install_event_pump(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>) {
     let weak = window.as_weak();
     let state = state.clone();
@@ -415,12 +402,18 @@ fn sync_playlist_to_ui(window: &PlayerWindow, playlist: &Playlist) {
 }
 
 fn refresh_current_index(window: &PlayerWindow, playlist: &Playlist) {
-    window.set_current_track_index(
-        playlist.current_index().map(|i| i as i32).unwrap_or(-1),
-    );
+    window.set_current_track_index(playlist.current_index().map(|i| i as i32).unwrap_or(-1));
 }
 
 fn push_playlist_to_thread(state: &PlayerWindowState) {
     let items: Vec<PlaylistItem> = state.playlist.items().to_vec();
     state.send(PlayerRequest::SetPlaylist(items));
+}
+
+fn display_error_dialog(text: &str) {
+    let _ = MessageDialog::new()
+        .set_title("NSFPlayer")
+        .set_text(text)
+        .set_type(MessageType::Error)
+        .show_alert();
 }

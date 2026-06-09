@@ -1,0 +1,23 @@
+[package]
+name = "nsf-player"
+version = "0.6.1"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "nsf-player"
+path = "src/main.rs"
+
+[dependencies]
+nsf-common = { path = "../nsf-common" }
+slint = "1.3.2"
+native-dialog = "0.6.3"
+arc-swap = "1.7"
+anyhow = "1.0.75"
+build-time = "0.1.3"
+
+[build-dependencies]
+slint-build = "1.3.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

@@ -3127,29 +3127,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsf-presenter-rs"
+name = "nsf-common"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "cpal",
+ "csscolorparser",
+ "encoding_rs",
+ "glob",
+ "ringbuf",
+ "rusticnes-core",
+ "rusticnes-ui-common",
+ "serde",
+ "toml 0.8.8",
+]
+
+[[package]]
+name = "nsf-player"
 version = "0.6.1"
 dependencies = [
  "anyhow",
  "arc-swap",
  "build-time",
+ "native-dialog",
+ "nsf-common",
+ "slint",
+ "slint-build",
+ "winres",
+]
+
+[[package]]
+name = "nsf-presenter"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "build-time",
  "clap",
- "cpal",
  "csscolorparser",
- "encoding_rs",
  "ffmpeg-next",
  "ffmpeg-sys-next",
- "glob",
  "image 0.19.0",
  "indicatif",
  "native-dialog",
- "ringbuf",
+ "nsf-common",
  "rusticnes-core",
  "rusticnes-ui-common",
- "serde",
  "slint",
  "slint-build",
- "toml 0.8.8",
  "winres",
 ]
 

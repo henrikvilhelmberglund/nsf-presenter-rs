@@ -4,10 +4,10 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::fs;
 use std::time::{Duration, Instant};
-use crate::emulator;
+use nsf_common::emulator;
 use crate::video_builder;
 use options::{RendererOptions, StopCondition};
-use crate::emulator::SongPosition;
+use nsf_common::emulator::SongPosition;
 
 pub struct Renderer {
     options: RendererOptions,

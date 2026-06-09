@@ -7,7 +7,7 @@ use rusticnes_ui_common::piano_roll_window::ChannelSettings;
 use rusticnes_ui_common::drawing;
 use csscolorparser::Color as CssColor;
 use crate::renderer::{Renderer, options::{RendererOptions, StopCondition}};
-use crate::emulator::Emulator;
+use nsf_common::emulator::Emulator;
 
 fn get_default_channel_settings() -> HashMap<(String, String), ChannelSettings> {
     let mut emulator = Emulator::new();

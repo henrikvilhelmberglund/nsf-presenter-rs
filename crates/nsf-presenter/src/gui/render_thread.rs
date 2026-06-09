@@ -2,7 +2,7 @@ use anyhow::{Error, anyhow};
 use std::thread;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use crate::emulator::SongPosition;
+use nsf_common::emulator::SongPosition;
 use crate::renderer::Renderer;
 use crate::renderer::options::RendererOptions;
 
