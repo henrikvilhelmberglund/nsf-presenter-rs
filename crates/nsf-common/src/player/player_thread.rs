@@ -31,6 +31,9 @@ pub enum PlayerRequest {
     SetVolume(u8),
     /// Replace the playlist entirely.
     SetPlaylist(Vec<PlaylistItem>),
+    /// Enable or disable anti-aliased note rendering. Persists across
+    /// track loads; default is `false` (crisp pixel edges).
+    SetAntiAliasing(bool),
     Terminate,
 }
 
@@ -178,22 +181,24 @@ fn run<F, G>(
     let mut playlist: Vec<PlaylistItem> = Vec::new();
     let mut current: Option<PlaybackState> = None;
     let mut volume: u8 = 255;
+    // Default: AA off (crisp pixel edges). Persists across track changes.
+    let mut anti_aliasing: bool = false;
     let mut terminating = false;
 
-    // Wall-clock pacing: produce one visual sub-frame per SUBFRAME_PERIOD.
-    // We split each NES frame into N sub-frames (default 4 → ~240 Hz). The
-    // piano-roll already updates its musical state at APU quarter-frame
-    // events (~240 Hz) regardless of when we snapshot the canvas, so
-    // sub-stepping the emulator and snapshotting between each yields real
-    // higher-rate motion — not interpolation — with no impact on NES
-    // timing or audio.
+    // Sub-frame stepping: produce one visual sub-frame per SUBFRAME_PERIOD
+    // by splitting each NES frame into N evenly-sized scanline batches
+    // (default 4 → ~240 Hz). The fixed-batch approach has slightly uneven
+    // row distribution (0/6/6/12 per sub-frame because APU quarter-frame
+    // events don't align perfectly with the batch boundaries), but in
+    // practice it ends up smoother-looking than an event-driven approach.
     const SUB_FRAMES_PER_FRAME: u32 = 4;
     let scanlines_per_subframe =
         Emulator::NES_NTSC_SCANLINES_PER_FRAME / SUB_FRAMES_PER_FRAME;
     let scanlines_last_subframe = Emulator::NES_NTSC_SCANLINES_PER_FRAME
         - scanlines_per_subframe * (SUB_FRAMES_PER_FRAME - 1);
-    let subframe_period =
-        Duration::from_secs_f64(1.0 / (crate::emulator::NES_NTSC_FRAMERATE * SUB_FRAMES_PER_FRAME as f64));
+    let subframe_period = Duration::from_secs_f64(
+        1.0 / (crate::emulator::NES_NTSC_FRAMERATE * SUB_FRAMES_PER_FRAME as f64),
+    );
     let mut next_subframe_target: Option<Instant> = None;
 
     while !terminating {
@@ -225,6 +230,7 @@ fn run<F, G>(
                 PlayerRequest::PlayItem(item) => {
                     match load_track(&item, feed.sample_rate) {
                         Ok(mut state) => {
+                            state.emulator.set_disable_aa(!anti_aliasing);
                             // Pre-fill the ring buffer so the audio callback never
                             // starts starved. ~150 ms of audio is plenty.
                             prefill(&mut state.emulator, &mut feed, volume, 150);
@@ -251,6 +257,7 @@ fn run<F, G>(
                     if let Some(item) = next_in_list(&playlist, current.as_ref().map(|s| &s.item)) {
                         match load_track(&item, feed.sample_rate) {
                             Ok(mut state) => {
+                                state.emulator.set_disable_aa(!anti_aliasing);
                                 prefill(&mut state.emulator, &mut feed, volume, 150);
                                 current = Some(state);
                                 next_subframe_target = Some(Instant::now());
@@ -270,6 +277,7 @@ fn run<F, G>(
                     if let Some(item) = prev_in_list(&playlist, current.as_ref().map(|s| &s.item)) {
                         match load_track(&item, feed.sample_rate) {
                             Ok(mut state) => {
+                                state.emulator.set_disable_aa(!anti_aliasing);
                                 prefill(&mut state.emulator, &mut feed, volume, 150);
                                 current = Some(state);
                                 next_subframe_target = Some(Instant::now());
@@ -301,6 +309,12 @@ fn run<F, G>(
                 PlayerRequest::SetVolume(v) => {
                     volume = v;
                 }
+                PlayerRequest::SetAntiAliasing(enabled) => {
+                    anti_aliasing = enabled;
+                    if let Some(state) = current.as_mut() {
+                        state.emulator.set_disable_aa(!enabled);
+                    }
+                }
                 PlayerRequest::Terminate => {
                     feed.audio_expected.store(false, Ordering::Relaxed);
                     terminating = true;
@@ -318,11 +332,7 @@ fn run<F, G>(
 
         pause_gate.wait_if_paused();
 
-        // Produce one full NES frame as N evenly-paced sub-frames. After
-        // each sub-frame we snapshot the piano-roll canvas (cheap; the
-        // canvas re-renders from the already-updated musical state) and
-        // notify the GUI. After all sub-frames we call end_frame() to
-        // dispatch the per-NES-frame Update event + loop detection.
+        // Produce one full NES frame as N evenly-paced sub-frames.
         for sub_index in 0..SUB_FRAMES_PER_FRAME {
             // Wall-clock pace each sub-frame.
             if let Some(target) = next_subframe_target {
@@ -465,6 +475,9 @@ fn load_track(item: &PlaylistItem, sample_rate: u32) -> Result<PlaybackState> {
     emulator.select_track(item.track_index);
     emulator.config_audio(sample_rate as u64, 0x10000, false, true, false);
     emulator.set_piano_roll_size(PLAYER_CANVAS_W, PLAYER_CANVAS_H);
+    // AA is configured by the caller after loading (see the SetAntiAliasing
+    // request handling in run()), so the user's choice persists across
+    // track loads.
 
     // Step a few frames and discard their audio to skip the NSF init transient
     // (writing APU registers during init produces a non-zero first sample,

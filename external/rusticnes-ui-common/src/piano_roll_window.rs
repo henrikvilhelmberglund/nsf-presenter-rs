@@ -442,6 +442,14 @@ pub struct PianoRollWindow {
     pub background_color: Color,
     pub outline_color: Color,
     pub outline_thickness: u32,
+    /// When true, slice/outline drawing snaps note edges to integer pixels
+    /// and skips alpha-blending. Default is anti-aliased rendering (false).
+    pub disable_aa: bool,
+    /// Monotonically incremented by `update()` — once per pushed slice
+    /// batch. Used by the player to detect when the piano-roll has a new
+    /// row available (the deque's `len()` alone can't be used, because
+    /// the deque caps at `roll_width()` and length stops growing).
+    pub update_counter: u64,
 
     // Keyed on: chip name, then channel name within that chip
     pub channel_settings: HashMap<String, HashMap<String, ChannelSettings>>,
@@ -478,7 +486,17 @@ impl PianoRollWindow {
             background_color: Color::rgba(0, 0, 0, 255),
             outline_color: Color::rgba(0, 0, 0, 255),
             outline_thickness: 2,
+            disable_aa: false,
+            update_counter: 0,
         };
+    }
+
+    /// Monotonic update counter. Increments by 1 on each `update()` call
+    /// (= each APU polling event). Use this to detect when a new visual
+    /// row has been pushed — unlike `time_slices.len()`, this keeps
+    /// growing after the deque hits its row-width cap.
+    pub fn update_counter(&self) -> u64 {
+        self.update_counter
     }
 
     fn collect_channels<'a>(&self, apu: &'a ApuState, mapper: &'a dyn Mapper) -> Vec<&'a dyn AudioChannelState> {
@@ -916,20 +934,29 @@ impl PianoRollWindow {
         };
     }
 
-    fn draw_slice_horiz(canvas: &mut SimpleBuffer, slice: &ChannelSlice, x: u32, base_y: u32, key_height: u32) {
+    fn draw_slice_horiz(canvas: &mut SimpleBuffer, slice: &ChannelSlice, x: u32, base_y: u32, key_height: u32, disable_aa: bool) {
         if !slice.visible {return;}
         let effective_y = (base_y as f32) - (slice.y * (key_height as f32)) + 0.5;
 
         let top_edge = effective_y - (slice.thickness / 2.0);
         let bottom_edge = effective_y + (slice.thickness / 2.0);
-        let top_floor = top_edge.floor();
-        let bottom_floor = bottom_edge.floor();
 
         // sanity range check:
         if top_edge < 0.0 || bottom_edge > canvas.height as f32 {
             return;
         }
 
+        if disable_aa {
+            let top = top_edge.round() as u32;
+            let bottom = bottom_edge.round() as u32;
+            for y in top..=bottom.max(top) {
+                canvas.put_pixel(x, y, slice.color);
+            }
+            return;
+        }
+
+        let top_floor = top_edge.floor();
+        let bottom_floor = bottom_edge.floor();
         let mut blended_color = slice.color;
         if top_floor == bottom_floor {
             // Special case: alpha here will be related to their distance. Draw one
@@ -955,20 +982,29 @@ impl PianoRollWindow {
         }
     }
 
-    fn draw_slice_vert(canvas: &mut SimpleBuffer, slice: &ChannelSlice, base_x: u32, y: u32, key_width: u32) {
+    fn draw_slice_vert(canvas: &mut SimpleBuffer, slice: &ChannelSlice, base_x: u32, y: u32, key_width: u32, disable_aa: bool) {
         if !slice.visible {return;}
         let effective_x = (base_x as f32) + (slice.y * (key_width as f32)) + 0.5;
 
         let left_edge = effective_x - (slice.thickness * (key_width as f32) / 4.0);
         let right_edge = effective_x + (slice.thickness * (key_width as f32) / 4.0);
-        let left_floor = left_edge.floor();
-        let right_floor = right_edge.floor();
 
         // sanity range check:
         if left_edge < 0.0 || right_edge > canvas.width as f32 {
             return;
         }
 
+        if disable_aa {
+            let left = left_edge.round() as u32;
+            let right = right_edge.round() as u32;
+            for x in left..=right.max(left) {
+                canvas.put_pixel(x, y, slice.color);
+            }
+            return;
+        }
+
+        let left_floor = left_edge.floor();
+        let right_floor = right_edge.floor();
         let mut blended_color = slice.color;
         if left_floor == right_floor {
             // Special case: alpha here will be related to their distance. Draw one
@@ -994,7 +1030,7 @@ impl PianoRollWindow {
         }
     }
 
-    fn draw_outline_vert(canvas: &mut SimpleBuffer, slice: &ChannelSlice, base_x: u32, y: u32, key_width: u32, color: Color, thickness: u32) {
+    fn draw_outline_vert(canvas: &mut SimpleBuffer, slice: &ChannelSlice, base_x: u32, y: u32, key_width: u32, color: Color, thickness: u32, disable_aa: bool) {
         if !slice.visible {return;}
         let effective_x = (base_x as f32) + (slice.y * (key_width as f32)) + 0.5;
 
@@ -1007,9 +1043,24 @@ impl PianoRollWindow {
         if right_floor < left_floor {
             // Do not attempt to draw this impossible note. Be gone, ye stack trace!
             return;
-        }        
+        }
 
         let outline_thickness = thickness as i32; // TODO: make this a setting!
+
+        if disable_aa {
+            let left = left_edge.max(0.0).round() as u32;
+            let right = right_edge.min((canvas.width - 1) as f32).round() as u32;
+            for offset in -outline_thickness ..= outline_thickness {
+                let effective_y = (y as i32) + offset;
+                if effective_y >= 0 && effective_y < (canvas.height as i32) {
+                    for x in left..=right.max(left) {
+                        canvas.put_pixel(x, effective_y as u32, color);
+                    }
+                }
+            }
+            return;
+        }
+
         for offset in -outline_thickness ..= outline_thickness {
             let effective_y = (y as i32) + offset;
             if effective_y >= 0 && effective_y < (canvas.height as i32) {
@@ -1034,17 +1085,18 @@ impl PianoRollWindow {
                     // line between them
                     for x in (left_floor as u32) + 1 .. right_floor as u32 {
                         canvas.put_pixel(x, effective_y as u32, color);
-                    }    
+                    }
                 }
             }
         }
     }
 
     fn draw_slices_horiz(&mut self, starting_x: u32, base_y: u32, step_direction: i32) {
+        let disable_aa = self.disable_aa;
         let mut x = starting_x;
         for channel_slice in self.time_slices.iter() {
             for note in channel_slice.iter() {
-                PianoRollWindow::draw_slice_horiz(&mut self.canvas, &note, x, base_y, self.key_thickness);
+                PianoRollWindow::draw_slice_horiz(&mut self.canvas, &note, x, base_y, self.key_thickness, disable_aa);
             }
             // bail if we hit either screen edge:
             if x == 0 || x == (self.canvas.width - 1) {
@@ -1055,13 +1107,14 @@ impl PianoRollWindow {
     }
 
     fn draw_outlines_vert(&mut self, base_x: u32, starting_y: u32, step_direction: i32, waveform_pos: u32) {
+        let disable_aa = self.disable_aa;
         let mut y = starting_y;
         for channel_slice in self.time_slices.iter() {
             for note in channel_slice.iter() {
                 if note.note_type == NoteType::Waveform {
-                    PianoRollWindow::draw_outline_vert(&mut self.canvas, &note, waveform_pos, y, self.key_thickness, self.outline_color, self.outline_thickness);
+                    PianoRollWindow::draw_outline_vert(&mut self.canvas, &note, waveform_pos, y, self.key_thickness, self.outline_color, self.outline_thickness, disable_aa);
                 } else {
-                    PianoRollWindow::draw_outline_vert(&mut self.canvas, &note, base_x, y, self.key_thickness, self.outline_color, self.outline_thickness);
+                    PianoRollWindow::draw_outline_vert(&mut self.canvas, &note, base_x, y, self.key_thickness, self.outline_color, self.outline_thickness, disable_aa);
                 }
             }
             // bail if we hit either screen edge:
@@ -1073,13 +1126,14 @@ impl PianoRollWindow {
     }
 
     fn draw_slices_vert(&mut self, base_x: u32, starting_y: u32, step_direction: i32, waveform_pos: u32) {
+        let disable_aa = self.disable_aa;
         let mut y = starting_y;
         for channel_slice in self.time_slices.iter() {
             for note in channel_slice.iter() {
                 if note.note_type == NoteType::Waveform {
-                    PianoRollWindow::draw_slice_vert(&mut self.canvas, &note, waveform_pos, y, self.key_thickness);
+                    PianoRollWindow::draw_slice_vert(&mut self.canvas, &note, waveform_pos, y, self.key_thickness, disable_aa);
                 } else {
-                    PianoRollWindow::draw_slice_vert(&mut self.canvas, &note, base_x, y, self.key_thickness);
+                    PianoRollWindow::draw_slice_vert(&mut self.canvas, &note, base_x, y, self.key_thickness, disable_aa);
                 }
             }
             // bail if we hit either screen edge:
@@ -1141,6 +1195,8 @@ impl PianoRollWindow {
         while self.time_slices.len() > self.roll_width() as usize {
             self.time_slices.pop_back();
         }
+
+        self.update_counter = self.update_counter.wrapping_add(1);
     }
 
     pub fn find_edge(edge_buffer: &RingBuffer, window_size: usize) -> usize {
@@ -1158,9 +1214,29 @@ impl PianoRollWindow {
     }
 
     fn draw_vertical_antialiased_line(&mut self, x: u32, top_edge: f32, bottom_edge: f32, color: Color) {
+        let disable_aa = self.disable_aa;
+        let canvas = &mut self.canvas;
+
+        if disable_aa {
+            // Snap to integer pixels, solid color throughout. Used by the
+            // surfboard (channel waveform at the top) — the AA version
+            // produces a soft glow which reads as blur in the live player.
+            if bottom_edge < 0.0 {
+                return;
+            }
+            let top = top_edge.round().max(0.0) as u32;
+            let bottom_clamped = bottom_edge
+                .round()
+                .min((canvas.height.saturating_sub(1)) as f32) as u32;
+            let bottom = bottom_clamped.max(top);
+            for y in top..=bottom {
+                canvas.put_pixel(x, y, color);
+            }
+            return;
+        }
+
         let top_floor = top_edge.floor();
         let bottom_floor = bottom_edge.floor();
-        let canvas = &mut self.canvas;
 
         let mut blended_color = color;
         if top_floor == bottom_floor {

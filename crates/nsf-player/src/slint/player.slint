@@ -83,6 +83,10 @@ export component PlayerWindow inherits Window {
     in property <bool> visualization-visible: true;
     /// 0 = Scaled (fit to window), 1 = 1x (960×540 letterbox), 2 = 2x (1920×1080 letterbox).
     in-out property <int> scale-mode: 0;
+    /// When true, render note edges anti-aliased (smooth sub-pixel motion
+    /// but blurry edges). When false (default), edges snap to integer
+    /// pixels for crisp pixel-art look.
+    in-out property <bool> anti-aliasing: false;
 
     callback open-files();
     callback open-folder();
@@ -95,6 +99,7 @@ export component PlayerWindow inherits Window {
     callback toggle-repeat(bool);
     callback toggle-visualization();
     callback set-scale-mode(int);
+    callback set-anti-aliasing(bool);
 
     title: "NSF Player";
     icon: @image-url("nsf-presenter-icon.png");
@@ -143,6 +148,12 @@ export component PlayerWindow inherits Window {
                     model: ["Scaled", "1x", "2x"];
                     current-index <=> root.scale-mode;
                     selected => { root.set-scale-mode(root.scale-mode); }
+                }
+                Rectangle { width: 8px; }
+                CheckBox {
+                    text: "AA";
+                    checked <=> root.anti-aliasing;
+                    toggled => { root.set-anti-aliasing(self.checked); }
                 }
                 Rectangle { width: 6px; }
                 FlatButton {

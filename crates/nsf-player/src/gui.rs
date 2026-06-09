@@ -313,6 +313,13 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
 
     {
         let state = state.clone();
+        window.on_set_anti_aliasing(move |on| {
+            state.borrow().send(PlayerRequest::SetAntiAliasing(on));
+        });
+    }
+
+    {
+        let state = state.clone();
         window.on_set_scale_mode(move |mode| {
             if let Some(viz) = state.borrow().viz_weak.upgrade() {
                 viz.set_scale_mode(mode);

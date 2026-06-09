@@ -63,6 +63,14 @@ impl Emulator {
         self.seek_mode = enabled;
     }
 
+    /// Toggle anti-aliased note rendering. When true, note edges are
+    /// alpha-blended for smooth sub-pixel motion (the default — what the
+    /// video renderer wants). When false, edges snap to integer pixels for
+    /// crisp pixel-art rendering.
+    pub fn set_disable_aa(&mut self, disabled: bool) {
+        self.piano_roll_window.disable_aa = disabled;
+    }
+
     pub fn driver_type(&self) -> NsfDriverType {
         match &self.nsf {
             Some(nsf) => nsf.driver_type(),
@@ -251,6 +259,25 @@ impl Emulator {
         for _ in 0..count {
             self.dispatch(Event::NesRunScanline);
         }
+    }
+
+    /// Run scanlines until the piano roll's update counter ticks (i.e.
+    /// an APU polling event has fired and a new row's worth of slices
+    /// has been pushed). Used for visually-smooth sub-frame stepping —
+    /// snapshots happen exactly when there's new content to show.
+    ///
+    /// Returns the number of scanlines actually run. Bounded to one NES
+    /// frame's worth of scanlines so we can't spin forever if the polling
+    /// type is set to something that never fires.
+    pub fn run_until_new_slice(&mut self) -> u32 {
+        let initial = self.piano_roll_window.update_counter();
+        for n in 1..=Self::NES_NTSC_SCANLINES_PER_FRAME {
+            self.dispatch(Event::NesRunScanline);
+            if self.piano_roll_window.update_counter() != initial {
+                return n;
+            }
+        }
+        Self::NES_NTSC_SCANLINES_PER_FRAME
     }
 
     /// Dispatch the per-NES-frame Update event and run loop detection.
