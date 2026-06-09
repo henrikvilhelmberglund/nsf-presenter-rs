@@ -7,12 +7,12 @@ export component VisualizationWindow inherits Window {
     ///   0 = "Scaled"  — image-fit: contain, fills the window (nearest-neighbor)
     ///   1 = "1x"      — native 960×540 centered with letterbox
     ///   2 = "2x"      — 1920×1080 nearest-neighbor centered with letterbox
-    in property <int> scale-mode: 0;
+    in property <int> scale-mode: 2;
 
     title: "NSF Visualization";
     icon: @image-url("nsf-presenter-icon.png");
-    preferred-width: 1280px;
-    preferred-height: 720px;
+    preferred-width: 1920px;
+    preferred-height: 1080px;
     min-width: 320px;
     min-height: 180px;
     background: black;

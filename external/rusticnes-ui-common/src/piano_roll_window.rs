@@ -947,9 +947,16 @@ impl PianoRollWindow {
         }
 
         if disable_aa {
+            // Round both edges, use a half-open range: [top, bottom).
+            // This matches the AA version exactly — AA's "top edge pixel
+            // alpha is 1.0 at integer-edge" (include) and "bottom edge
+            // pixel alpha is 0.0 at integer-edge" (exclude). Result: a
+            // note of nominal thickness T renders as exactly T pixels,
+            // centered consistently regardless of the fractional position
+            // of `effective_y`.
             let top = top_edge.round() as u32;
             let bottom = bottom_edge.round() as u32;
-            for y in top..=bottom.max(top) {
+            for y in top..bottom.max(top + 1) {
                 canvas.put_pixel(x, y, slice.color);
             }
             return;
@@ -997,7 +1004,7 @@ impl PianoRollWindow {
         if disable_aa {
             let left = left_edge.round() as u32;
             let right = right_edge.round() as u32;
-            for x in left..=right.max(left) {
+            for x in left..right.max(left + 1) {
                 canvas.put_pixel(x, y, slice.color);
             }
             return;
@@ -1053,7 +1060,7 @@ impl PianoRollWindow {
             for offset in -outline_thickness ..= outline_thickness {
                 let effective_y = (y as i32) + offset;
                 if effective_y >= 0 && effective_y < (canvas.height as i32) {
-                    for x in left..=right.max(left) {
+                    for x in left..right.max(left + 1) {
                         canvas.put_pixel(x, effective_y as u32, color);
                     }
                 }
@@ -1218,18 +1225,16 @@ impl PianoRollWindow {
         let canvas = &mut self.canvas;
 
         if disable_aa {
-            // Snap to integer pixels, solid color throughout. Used by the
-            // surfboard (channel waveform at the top) — the AA version
-            // produces a soft glow which reads as blur in the live player.
+            // Same round + half-open width-matching as the slice draws.
             if bottom_edge < 0.0 {
                 return;
             }
             let top = top_edge.round().max(0.0) as u32;
             let bottom_clamped = bottom_edge
                 .round()
-                .min((canvas.height.saturating_sub(1)) as f32) as u32;
-            let bottom = bottom_clamped.max(top);
-            for y in top..=bottom {
+                .min(canvas.height as f32) as u32;
+            let bottom = bottom_clamped.max(top + 1);
+            for y in top..bottom {
                 canvas.put_pixel(x, y, color);
             }
             return;
@@ -1323,8 +1328,14 @@ impl PianoRollWindow {
                 top_edge = last_y;
                 bottom_edge = current_y;
             }
-            let glow_color = PianoRollWindow::scale_color(color, 0.25);
-            self.draw_vertical_antialiased_line(dx, y as f32 + top_edge - self.surfboard_glow_thickness, y as f32 + bottom_edge + self.surfboard_glow_thickness, glow_color);
+            // The glow is a wider dim line behind the main one; with AA
+            // it gives a soft halo around the waveform. With AA off,
+            // that halo just reads as a chunky outline — skip it so the
+            // waveform is a clean 1-pixel line.
+            if !self.disable_aa {
+                let glow_color = PianoRollWindow::scale_color(color, 0.25);
+                self.draw_vertical_antialiased_line(dx, y as f32 + top_edge - self.surfboard_glow_thickness, y as f32 + bottom_edge + self.surfboard_glow_thickness, glow_color);
+            }
             self.draw_vertical_antialiased_line(dx, y as f32 + top_edge - self.surfboard_line_thickness, y as f32 + bottom_edge + self.surfboard_line_thickness, color);
             last_y = current_y;
         }

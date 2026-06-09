@@ -77,8 +77,10 @@ fn open_player_window() -> Result<()> {
     let player_y: f32 = 100.0;
     let player_w_size: f32 = 640.0;
     let player_h_size: f32 = 620.0;
-    let viz_w_size: f32 = 1280.0;
-    let viz_h_size: f32 = 720.0;
+    // Default scale mode is 2x — match the size so the canvas renders
+    // pixel-perfect from startup, not letterboxed.
+    let viz_w_size: f32 = 1920.0;
+    let viz_h_size: f32 = 1080.0;
     let gap: f32 = 12.0;
 
     player_w.show().context("Failed to show player window")?;

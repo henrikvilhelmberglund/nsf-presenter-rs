@@ -82,7 +82,7 @@ export component PlayerWindow inherits Window {
     in property <string> status-text: "";
     in property <bool> visualization-visible: true;
     /// 0 = Scaled (fit to window), 1 = 1x (960×540 letterbox), 2 = 2x (1920×1080 letterbox).
-    in-out property <int> scale-mode: 0;
+    in-out property <int> scale-mode: 2;
     /// When true, render note edges anti-aliased (smooth sub-pixel motion
     /// but blurry edges). When false (default), edges snap to integer
     /// pixels for crisp pixel-art look.
