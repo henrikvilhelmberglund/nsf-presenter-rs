@@ -307,7 +307,7 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
     {
         let state = state.clone();
         window.on_toggle_repeat(move |checked| {
-            state.borrow_mut().playlist.repeat = checked;
+            state.borrow().send(PlayerRequest::SetRepeatTrack(checked));
         });
     }
 

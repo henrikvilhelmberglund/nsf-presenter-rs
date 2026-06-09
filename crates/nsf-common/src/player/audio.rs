@@ -142,6 +142,16 @@ fn fill_buffer_i16(
     underruns: &AtomicU64,
     audio_expected: &AtomicBool,
 ) {
+    // When paused / between tracks, output silence WITHOUT draining the
+    // ring buffer. Otherwise queued pre-pause samples would leak through
+    // and cause a "noise for a few frames" glitch on resume.
+    if !audio_expected.load(Ordering::Relaxed) {
+        for slot in out.iter_mut() {
+            *slot = 0;
+        }
+        return;
+    }
+
     let mut filled = 0;
     while filled < out.len() {
         match consumer.try_pop() {
@@ -153,9 +163,7 @@ fn fill_buffer_i16(
         }
     }
     if filled < out.len() {
-        if audio_expected.load(Ordering::Relaxed) {
-            underruns.fetch_add(1, Ordering::Relaxed);
-        }
+        underruns.fetch_add(1, Ordering::Relaxed);
         for slot in &mut out[filled..] {
             *slot = 0;
         }
@@ -168,6 +176,14 @@ fn fill_buffer_convert<T: Sample + cpal::FromSample<i16>>(
     underruns: &AtomicU64,
     audio_expected: &AtomicBool,
 ) {
+    if !audio_expected.load(Ordering::Relaxed) {
+        let silence = T::EQUILIBRIUM;
+        for slot in out.iter_mut() {
+            *slot = silence;
+        }
+        return;
+    }
+
     let mut filled = 0;
     while filled < out.len() {
         match consumer.try_pop() {
@@ -179,9 +195,7 @@ fn fill_buffer_convert<T: Sample + cpal::FromSample<i16>>(
         }
     }
     if filled < out.len() {
-        if audio_expected.load(Ordering::Relaxed) {
-            underruns.fetch_add(1, Ordering::Relaxed);
-        }
+        underruns.fetch_add(1, Ordering::Relaxed);
         let silence = T::EQUILIBRIUM;
         for slot in &mut out[filled..] {
             *slot = silence;

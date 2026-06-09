@@ -202,14 +202,52 @@ export component PlayerWindow inherits Window {
                     y: (parent.height - self.height) / 2;
                 }
                 Rectangle { width: 6px; }
-                Slider {
+                // Custom volume slider — Slint 1.3's std Slider treats
+                // a click as the start of a relative drag, but most music
+                // players expect a click to jump to that position. This
+                // Rectangle + TouchArea translates mouse-x → volume
+                // directly on click and on drag.
+                Rectangle {
                     width: 140px;
-                    minimum: 0;
-                    maximum: 255;
-                    value: root.volume;
-                    changed(v) => {
-                        root.volume = Math.round(v);
-                        root.set-volume(Math.round(v));
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+
+                    track := Rectangle {
+                        width: parent.width;
+                        height: 6px;
+                        y: (parent.height - self.height) / 2;
+                        background: #2c2c2c;
+                        border-radius: 3px;
+                        clip: true;
+
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            height: parent.height;
+                            width: parent.width * Math.max(0.0, Math.min(1.0, root.volume / 255));
+                            background: #2563c4;
+                            border-radius: 3px;
+                        }
+                    }
+
+                    vol-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            // Snap-to-click. `mouse-x` is relative to the
+                            // TouchArea, which fills the slider width.
+                            root.volume = Math.max(0, Math.min(255,
+                                Math.round((vol-touch.mouse-x / parent.width) * 255)));
+                            root.set-volume(root.volume);
+                        }
+                        moved => {
+                            // While dragging (mouse held down), update
+                            // continuously.
+                            if (vol-touch.pressed) {
+                                root.volume = Math.max(0, Math.min(255,
+                                    Math.round((vol-touch.mouse-x / parent.width) * 255)));
+                                root.set-volume(root.volume);
+                            }
+                        }
                     }
                 }
                 Rectangle { width: 6px; }

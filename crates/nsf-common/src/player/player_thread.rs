@@ -3,7 +3,7 @@ use arc_swap::ArcSwap;
 use ringbuf::traits::{Observer, Producer};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,10 @@ pub enum PlayerRequest {
     /// Enable or disable anti-aliased note rendering. Persists across
     /// track loads; default is `false` (crisp pixel edges).
     SetAntiAliasing(bool),
+    /// When true, the current track loops forever (TrackEnded never
+    /// fires from loop detection). When false (default), the track ends
+    /// after one detected loop and the GUI advances the playlist.
+    SetRepeatTrack(bool),
     Terminate,
 }
 
@@ -51,34 +55,6 @@ pub enum PlayerEvent {
     Error(String),
 }
 
-struct PauseGate {
-    paused: Mutex<bool>,
-    cv: Condvar,
-}
-
-impl PauseGate {
-    fn new() -> Self {
-        Self {
-            paused: Mutex::new(false),
-            cv: Condvar::new(),
-        }
-    }
-
-    fn set(&self, paused: bool) {
-        let mut g = self.paused.lock().unwrap();
-        *g = paused;
-        if !paused {
-            self.cv.notify_all();
-        }
-    }
-
-    fn wait_if_paused(&self) {
-        let mut g = self.paused.lock().unwrap();
-        while *g {
-            g = self.cv.wait(g).unwrap();
-        }
-    }
-}
 
 pub struct PlayerHandle {
     pub tx: mpsc::Sender<PlayerRequest>,
@@ -177,12 +153,15 @@ fn run<F, G>(
     F: Fn(PlayerEvent) + Send + 'static,
     G: Fn() + Send + 'static,
 {
-    let pause_gate = Arc::new(PauseGate::new());
     let mut playlist: Vec<PlaylistItem> = Vec::new();
     let mut current: Option<PlaybackState> = None;
+    let mut paused: bool = false;
     let mut volume: u8 = 255;
     // Default: AA off (crisp pixel edges). Persists across track changes.
     let mut anti_aliasing: bool = false;
+    // Default: track ends after one detected loop (the GUI then advances
+    // the playlist). When true, the track loops indefinitely.
+    let mut repeat_track: bool = false;
     let mut terminating = false;
 
     // Sub-frame stepping: produce one visual sub-frame per SUBFRAME_PERIOD
@@ -202,9 +181,13 @@ fn run<F, G>(
     let mut next_subframe_target: Option<Instant> = None;
 
     while !terminating {
-        // Drain any pending requests before doing work.
+        // Drain any pending requests before doing work. If we have nothing
+        // to do (no current track OR paused), block on rx.recv() so we
+        // don't spin-wait. The blocking recv also resolves the
+        // pause-deadlock: a Resume message naturally wakes us.
         loop {
-            let msg = if current.is_some() {
+            let active = current.is_some() && !paused;
+            let msg = if active {
                 match rx.try_recv() {
                     Ok(m) => Some(m),
                     Err(mpsc::TryRecvError::Empty) => None,
@@ -214,7 +197,6 @@ fn run<F, G>(
                     }
                 }
             } else {
-                // No track playing — block waiting for instructions.
                 match rx.recv() {
                     Ok(m) => Some(m),
                     Err(_) => {
@@ -294,12 +276,12 @@ fn run<F, G>(
                     }
                 }
                 PlayerRequest::Pause => {
-                    pause_gate.set(true);
+                    paused = true;
                     feed.audio_expected.store(false, Ordering::Relaxed);
                     event_cb(PlayerEvent::PlaybackPaused);
                 }
                 PlayerRequest::Resume => {
-                    pause_gate.set(false);
+                    paused = false;
                     if current.is_some() {
                         next_subframe_target = Some(Instant::now());
                         feed.audio_expected.store(true, Ordering::Relaxed);
@@ -314,6 +296,9 @@ fn run<F, G>(
                     if let Some(state) = current.as_mut() {
                         state.emulator.set_disable_aa(!enabled);
                     }
+                }
+                PlayerRequest::SetRepeatTrack(enabled) => {
+                    repeat_track = enabled;
                 }
                 PlayerRequest::Terminate => {
                     feed.audio_expected.store(false, Ordering::Relaxed);
@@ -330,7 +315,9 @@ fn run<F, G>(
             continue;
         };
 
-        pause_gate.wait_if_paused();
+        // Pausing is handled at the rx-recv() level above (blocking recv
+        // when paused), so by the time we reach the sub-frame work we
+        // know we're not paused.
 
         // Produce one full NES frame as N evenly-paced sub-frames.
         for sub_index in 0..SUB_FRAMES_PER_FRAME {
@@ -373,7 +360,7 @@ fn run<F, G>(
 
         // Crude end-of-track: stop on song end (Cxx) for FT-based drivers, or when an
         // NSFe duration was provided and we've passed it.
-        if track_ended(&state.emulator, &state.item) {
+        if track_ended(&state.emulator, &state.item, repeat_track) {
             event_cb(PlayerEvent::TrackEnded);
             current = None;
             feed.audio_expected.store(false, Ordering::Relaxed);
@@ -450,19 +437,33 @@ fn prefill(emulator: &mut Emulator, feed: &mut AudioFeed, volume: u8, target_ms:
     }
 }
 
-fn track_ended(emulator: &Emulator, item: &PlaylistItem) -> bool {
+fn track_ended(emulator: &Emulator, item: &PlaylistItem, repeat_track: bool) -> bool {
+    // Always-on end conditions: an explicit driver end marker (Cxx in
+    // FamiTracker) and the NSFe/M3U duration. These represent "the song
+    // really ended" and override the repeat flag.
     if let Some(pos) = emulator.get_song_position() {
         if pos.end {
             return true;
         }
     }
-    // If we have a known duration and we've passed it, stop.
     if let Some(secs) = item.duration_seconds {
         let frames = (secs as f64 * crate::emulator::NES_NTSC_FRAMERATE) as u64;
         if emulator.last_frame() as u64 > frames {
             return true;
         }
     }
+
+    // Loop-based end: after the FT loop detector has seen the song repeat
+    // once, advance to the next playlist track — unless the user wants
+    // the current track to loop indefinitely.
+    if !repeat_track {
+        if let Some(count) = emulator.loop_count() {
+            if count >= 1 {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
