@@ -1,19 +1,51 @@
 export component VisualizationWindow inherits Window {
     in property <image> visualization-frame;
+    /// When true, scale the canvas with nearest-neighbor (crisp pixels but
+    /// shimmery at non-integer scales). When false, use smooth (bilinear)
+    /// scaling — slight blur, but smooth motion at any window size.
+    /// Scaling mode for the canvas:
+    ///   0 = "Scaled"  — image-fit: contain, fills the window (nearest-neighbor)
+    ///   1 = "1x"      — native 960×540 centered with letterbox
+    ///   2 = "2x"      — 1920×1080 nearest-neighbor centered with letterbox
+    in property <int> scale-mode: 0;
 
     title: "NSF Visualization";
     icon: @image-url("nsf-presenter-icon.png");
-    preferred-width: 960px;
-    preferred-height: 540px;
+    preferred-width: 1280px;
+    preferred-height: 720px;
     min-width: 320px;
     min-height: 180px;
     background: black;
 
-    Image {
-        source: root.visualization-frame;
-        image-fit: contain;
+    // Wrapped in a Rectangle so we can clip if the user shrinks the window
+    // below the canvas's pinned size in 1x or 2x modes.
+    Rectangle {
         width: parent.width;
         height: parent.height;
-        image-rendering: pixelated;
+        clip: true;
+
+        if root.scale-mode == 0: Image {
+            source: root.visualization-frame;
+            image-fit: contain;
+            width: parent.width;
+            height: parent.height;
+            image-rendering: pixelated;
+        }
+        if root.scale-mode == 1: Image {
+            source: root.visualization-frame;
+            width: 960px;
+            height: 540px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            // Source == display size, no scaling.
+        }
+        if root.scale-mode == 2: Image {
+            source: root.visualization-frame;
+            width: 1920px;
+            height: 1080px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            image-rendering: pixelated;
+        }
     }
 }

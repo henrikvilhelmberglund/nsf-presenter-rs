@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use native_dialog::{FileDialog, MessageDialog, MessageType};
 use slint::{
-    ComponentHandle, Image, Model, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel,
-    Weak,
+    ComponentHandle, Image, LogicalPosition, LogicalSize, Model, SharedPixelBuffer,
+    SharedString, Timer, TimerMode, VecModel, Weak, WindowPosition, WindowSize,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -69,8 +69,35 @@ fn open_player_window() -> Result<()> {
 
     player_w.set_visualization_visible(true);
 
+    // Default placement: controls window on the left, visualization to its
+    // right at the same Y. Sizes come from the .slint preferred-width/height.
+    // set_size/set_position MUST be called after show() — Slint applies its
+    // own initial sizing on show() and overrides earlier set_size calls.
+    let player_x: f32 = 100.0;
+    let player_y: f32 = 100.0;
+    let player_w_size: f32 = 640.0;
+    let player_h_size: f32 = 620.0;
+    let viz_w_size: f32 = 1280.0;
+    let viz_h_size: f32 = 720.0;
+    let gap: f32 = 12.0;
+
     player_w.show().context("Failed to show player window")?;
     viz_w.show().context("Failed to show visualization window")?;
+
+    player_w
+        .window()
+        .set_size(WindowSize::Logical(LogicalSize::new(player_w_size, player_h_size)));
+    player_w
+        .window()
+        .set_position(WindowPosition::Logical(LogicalPosition::new(player_x, player_y)));
+
+    viz_w
+        .window()
+        .set_size(WindowSize::Logical(LogicalSize::new(viz_w_size, viz_h_size)));
+    viz_w.window().set_position(WindowPosition::Logical(LogicalPosition::new(
+        player_x + player_w_size + gap,
+        player_y,
+    )));
 
     slint::run_event_loop().context("Slint event loop failed")?;
 
@@ -285,6 +312,32 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
     }
 
     {
+        let state = state.clone();
+        window.on_set_scale_mode(move |mode| {
+            if let Some(viz) = state.borrow().viz_weak.upgrade() {
+                viz.set_scale_mode(mode);
+                // 1x and 2x snap the viz window to exact pixel sizes so the
+                // user actually sees the canvas at that resolution instead
+                // of letterboxed inside a bigger window. Scaled mode leaves
+                // the user's window size alone.
+                match mode {
+                    1 => {
+                        viz.window().set_size(WindowSize::Logical(
+                            LogicalSize::new(960.0, 540.0),
+                        ));
+                    }
+                    2 => {
+                        viz.window().set_size(WindowSize::Logical(
+                            LogicalSize::new(1920.0, 1080.0),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    {
         let weak = window.as_weak();
         let state = state.clone();
         window.on_toggle_visualization(move || {
@@ -316,16 +369,12 @@ fn install_status_timer(player_w: &PlayerWindow, state: &Rc<RefCell<PlayerWindow
         move || {
             let state = state.borrow();
             let Some(player) = state.player.as_ref() else { return };
+            let Some(w) = player_weak.upgrade() else { return };
 
             let underruns = player.underruns.load(Ordering::Relaxed);
             if underruns != last_underruns.get() {
                 last_underruns.set(underruns);
-                if let Some(w) = player_weak.upgrade() {
-                    w.set_status_text(SharedString::from(format!(
-                        "underruns: {}",
-                        underruns
-                    )));
-                }
+                w.set_status_text(SharedString::from(format!("underruns: {}", underruns)));
             }
         },
     );

@@ -28,7 +28,12 @@ pub struct Emulator {
     song_positions: HashMap<SongPosition, u32>,
     last_position: Option<SongPosition>,
     loop_duration: Option<(usize, usize)>,
-    loop_count: usize
+    loop_count: usize,
+    /// When true, dispatched events skip `PianoRollWindow::handle_event`,
+    /// which is the most expensive per-scanline work — it analyzes channel
+    /// state on every APU quarter-frame whether or not we ever read the
+    /// canvas. Use during fast-forward (e.g. seek) for a ~4× speedup.
+    seek_mode: bool,
 }
 
 impl Emulator {
@@ -44,8 +49,18 @@ impl Emulator {
             song_positions: HashMap::new(),
             last_position: None,
             loop_duration: None,
-            loop_count: 0
+            loop_count: 0,
+            seek_mode: false,
         }
+    }
+
+    /// Toggle "seek mode": dispatched events bypass the piano-roll window's
+    /// handler so the emulator runs ~4× faster during fast-forward. The
+    /// piano-roll's internal state will be stale when you turn it off; the
+    /// first few rendered frames may look odd until normal playback fills
+    /// its history again.
+    pub fn set_seek_mode(&mut self, enabled: bool) {
+        self.seek_mode = enabled;
     }
 
     pub fn driver_type(&self) -> NsfDriverType {
@@ -57,7 +72,9 @@ impl Emulator {
 
     fn _dispatch(&mut self) {
         while let Some(event) = self.event_queue.pop_front() {
-            self.event_queue.extend(self.piano_roll_window.handle_event(&self.runtime, event.clone()));
+            if !self.seek_mode {
+                self.event_queue.extend(self.piano_roll_window.handle_event(&self.runtime, event.clone()));
+            }
             self.event_queue.extend(self.runtime.handle_event(event.clone()));
         };
     }

@@ -1,4 +1,4 @@
-import { Button, CheckBox, Slider, ListView, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, Slider, ListView, ScrollView } from "std-widgets.slint";
 
 export struct PlaylistRow {
     display-name: string,
@@ -81,6 +81,8 @@ export component PlayerWindow inherits Window {
     in property <int> current-track-index: -1;
     in property <string> status-text: "";
     in property <bool> visualization-visible: true;
+    /// 0 = Scaled (fit to window), 1 = 1x (960×540 letterbox), 2 = 2x (1920×1080 letterbox).
+    in-out property <int> scale-mode: 0;
 
     callback open-files();
     callback open-folder();
@@ -92,6 +94,7 @@ export component PlayerWindow inherits Window {
     callback set-volume(int);
     callback toggle-repeat(bool);
     callback toggle-visualization();
+    callback set-scale-mode(int);
 
     title: "NSF Player";
     icon: @image-url("nsf-presenter-icon.png");
@@ -129,6 +132,19 @@ export component PlayerWindow inherits Window {
                     clicked => { root.clear-playlist(); }
                 }
                 Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: "Scale:";
+                    vertical-alignment: center;
+                    color: #cccccc;
+                    font-size: 12px;
+                }
+                Rectangle { width: 4px; }
+                ComboBox {
+                    model: ["Scaled", "1x", "2x"];
+                    current-index <=> root.scale-mode;
+                    selected => { root.set-scale-mode(root.scale-mode); }
+                }
+                Rectangle { width: 6px; }
                 FlatButton {
                     text: "Visualization";
                     active: root.visualization-visible;

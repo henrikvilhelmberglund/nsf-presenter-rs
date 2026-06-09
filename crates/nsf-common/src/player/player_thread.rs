@@ -81,6 +81,9 @@ pub struct PlayerHandle {
     pub tx: mpsc::Sender<PlayerRequest>,
     pub latest_frame: Arc<LatestFrame>,
     pub underruns: Arc<AtomicU64>,
+    /// NES frame index of the most recently produced frame. The GUI polls
+    /// this to update the seek bar and elapsed-time display.
+    pub current_frame: Arc<AtomicU64>,
     // `AudioSink` owns the cpal::Stream, which is `!Send` on Windows/macOS.
     // It must live on the thread that created it (the GUI thread). Keeping
     // it inside the handle ties the stream's lifetime to the handle's.
@@ -124,17 +127,27 @@ where
     let (sink, feed) =
         AudioSink::open().context("Failed to open audio output device")?;
     let underruns = feed.underruns.clone();
+    let current_frame = Arc::new(AtomicU64::new(0));
+    let current_frame_thread = current_frame.clone();
 
     let handle = thread::Builder::new()
         .name("nsf-player".into())
         .spawn(move || {
-            run(rx, feed, latest_frame_thread, event_cb, on_new_frame);
+            run(
+                rx,
+                feed,
+                latest_frame_thread,
+                current_frame_thread,
+                event_cb,
+                on_new_frame,
+            );
         })?;
 
     Ok(PlayerHandle {
         tx,
         latest_frame,
         underruns,
+        current_frame,
         _sink: sink,
         handle: Some(handle),
     })
@@ -154,6 +167,7 @@ fn run<F, G>(
     rx: mpsc::Receiver<PlayerRequest>,
     mut feed: AudioFeed,
     latest_frame: Arc<LatestFrame>,
+    current_frame: Arc<AtomicU64>,
     event_cb: F,
     on_new_frame: G,
 ) where
@@ -337,6 +351,7 @@ fn run<F, G>(
 
         // Per-NES-frame bookkeeping (Update event + loop detection).
         state.emulator.end_frame();
+        current_frame.store(state.emulator.last_frame() as u64, Ordering::Relaxed);
 
         // Drain every sample the APU emitted this frame and push them all into
         // the ring buffer. push_samples blocks when the buffer is full — that

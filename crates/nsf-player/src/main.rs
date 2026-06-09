@@ -1,3 +1,8 @@
+// On Windows, no console window — the player is a pure GUI app. stdout/stderr
+// still go somewhere (nowhere visible) so eprintln! debug messages won't be
+// seen; use the in-window status bar for user-facing info.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod gui;
 
 use build_time::build_time_utc;
