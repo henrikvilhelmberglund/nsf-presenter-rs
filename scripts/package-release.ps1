@@ -84,15 +84,28 @@ Copy-Item $presenterExe $presenterPkg
 Copy-Item (Join-Path $repoRoot 'README.md') $presenterPkg
 Copy-Item (Join-Path $repoRoot 'LICENSE') $presenterPkg
 
-# Copy the major FFmpeg runtime DLLs. We grab any *-NN.dll matching the
-# six libraries the renderer uses, plus any plain dependency *.dll the
-# user happens to have (zlib1, etc.).
-$ffmpegLibs = @('avcodec', 'avformat', 'avutil', 'swscale', 'swresample', 'avfilter', 'avdevice')
+# Pin to the FFmpeg 7.x major-version DLL names that ffmpeg-sys-next v7.1.x
+# binds against. If you have both FFmpeg 6 and 7 installed in the same
+# bin/ (multiple -NN.dll versions side-by-side), copying everything would
+# bloat the zip by ~60 MB with DLLs the binary never loads.
+$ffmpegLibs = @{
+    'avcodec'    = '61'
+    'avformat'   = '61'
+    'avutil'     = '59'
+    'swscale'    = '8'
+    'swresample' = '5'
+    'avfilter'   = '10'
+    'avdevice'   = '61'
+}
 $copied = New-Object System.Collections.Generic.HashSet[string]
-foreach ($lib in $ffmpegLibs) {
-    Get-ChildItem -Path $ffmpegBin -Filter "$lib-*.dll" | ForEach-Object {
-        Copy-Item $_.FullName $presenterPkg
-        $copied.Add($_.Name) | Out-Null
+foreach ($lib in $ffmpegLibs.Keys) {
+    $name = "$lib-$($ffmpegLibs[$lib]).dll"
+    $p = Join-Path $ffmpegBin $name
+    if (Test-Path $p) {
+        Copy-Item $p $presenterPkg
+        $copied.Add($name) | Out-Null
+    } else {
+        Write-Warning "$name not found in $ffmpegBin — the rendered exe may fail to start"
     }
 }
 # Also grab common companions (zlib, etc.) — small, safer to include.

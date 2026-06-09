@@ -1,4 +1,5 @@
 /target
+/dist
 *.nsf
 *.mp4
 *.mkv
