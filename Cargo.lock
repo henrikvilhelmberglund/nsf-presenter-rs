@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "nsf-common"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "nsf-player"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "nsf-presenter"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "build-time",

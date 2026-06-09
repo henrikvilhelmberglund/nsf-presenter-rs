@@ -1,8 +1,117 @@
 <p align="center">
-    <img src="assets/nsf-presenter-icon-xl.png" />
+    <img src="crates/nsf-presenter/assets/nsf-presenter-icon-xl.png" />
 </p>
 
-# NSFPresenter
+# NSFPresenter + NSFPlayer
+
+This repository now contains **two** related binaries built from a shared
+emulator core:
+
+- **`nsf-presenter.exe`** — the original tool: renders an NSF through the
+  RusticNES emulator and encodes the piano-roll visualization + audio into
+  a video file via FFmpeg.
+- **`nsf-player.exe`** (new in **v0.7.0**) — a real-time, foobar2000-style
+  player that plays an NSF through your speakers while showing the same
+  piano-roll visualization live in a separate window. No FFmpeg
+  dependency, no encoding — just playback.
+
+Both binaries share `nsf-common` (the emulator wrapper, audio engine,
+playlist + duration parsing) and the (lightly-customized) vendored
+RusticNES under `external/`.
+
+## What's new in v0.7.0
+
+### NSFPlayer (standalone real-time player)
+
+A separate Windows GUI application focused on listening, not encoding. Key
+features:
+
+- **Playlist pane** — add individual `.nsf` / `.nsfe` files, or recursively
+  scan a folder. Each NSF's subsongs are expanded as individual playlist
+  rows with track titles pulled from NSFe / accompanying M3U metadata.
+- **Transport controls** — play / pause, prev / next, master volume, and a
+  *Repeat playlist* checkbox.
+- **Separate visualization window** opens alongside the controls. Resize
+  freely, or use the **Scale: Scaled / 1x / 2x** dropdown in the toolbar to
+  snap the window to exact 960×540 / 1920×1080 sizing for pixel-perfect
+  display.
+- **Anti-aliasing toggle (AA)** — defaults to crisp pixel-art note
+  rendering by snapping note edges to integer pixels. Flip on for the
+  smooth anti-aliased look the renderer uses.
+- **Sub-frame visualization stepping (~240 Hz)** — the piano-roll canvas
+  is snapshotted four times per NES frame so scroll looks smooth on
+  high-refresh displays. Audio timing remains bit-exact at the NES's
+  60.0988 Hz.
+- **Wall-clock-paced audio with high-resolution Windows timer** — the
+  player calls `timeBeginPeriod(1)` at startup so `thread::sleep` is
+  accurate enough for jitter-free 60 Hz frame pacing.
+
+### Workspace restructure
+
+The source is now organized as a cargo workspace under `crates/`:
+
+```
+crates/
+  nsf-common/     # shared library: emulator, audio engine, playlist, etc.
+  nsf-presenter/  # video renderer + GUI + CLI (depends on ffmpeg)
+  nsf-player/     # standalone real-time player (no ffmpeg dep)
+```
+
+The player binary doesn't link FFmpeg at all, so it builds much faster
+than the renderer and is trivially distributable without bundled DLLs.
+
+### Other changes
+
+- Recent commit adds a filter graph to skip the initialization-pop noise
+  at the start of rendered video output.
+- RusticNES customizations: added `disable_aa` for pixel-perfect note
+  edges, exposed an `update_counter` and per-scanline stepping helpers
+  used by the player's sub-frame visualization.
+
+## Installation (v0.7.0)
+
+**Windows**:
+- **`nsf-player-windows.zip`** — standalone player. Unzip and run
+  `nsf-player.exe`. No external dependencies; the player does not link
+  FFmpeg.
+- **`nsf-presenter-windows.zip`** — video renderer with the required
+  FFmpeg DLLs bundled. Unzip and run `nsf-presenter.exe`.
+
+**Linux**: still source-only. See the original "Installation" section
+below for FFmpeg/Qt6 prerequisites.
+
+## Building from source
+
+The repo is a cargo workspace. From the repository root:
+
+```
+# Build just the player (fast — no FFmpeg involvement):
+cargo build --release -p nsf-player
+
+# Build just the renderer:
+cargo build --release -p nsf-presenter
+
+# Build both:
+cargo build --release
+```
+
+Outputs land in `target/release/nsf-player.exe` and
+`target/release/nsf-presenter.exe`.
+
+The renderer requires a working FFmpeg installation findable via
+`pkg-config` or `FFMPEG_DIR`. See the original Installation notes below.
+
+## VS Code tasks
+
+`.vscode/tasks.json` includes:
+
+- **Build nsf-player (release)** — `Ctrl+Shift+B`, default build task.
+- **Run nsf-player** — builds + launches the player detached.
+- **Build nsf-presenter (release)**.
+
+---
+
+# NSFPresenter (original README)
 
 NSFPresenter is a tool I wrote to generate visualizations of my
 [Dn-FamiTracker][dn-ft] covers, based on [RusticNES][rusticnes],
@@ -10,8 +119,8 @@ NSFPresenter is a tool I wrote to generate visualizations of my
 You can see it in action on [my YouTube channel][yt]. I also wrote it
 to learn how to write Rust.
 
-![Slint logo](assets/MadeWithSlint-logo-light.svg#gh-light-mode-only)
-![Slint logo](assets/MadeWithSlint-logo-dark.svg#gh-dark-mode-only)
+![Slint logo](crates/nsf-presenter/assets/MadeWithSlint-logo-light.svg#gh-light-mode-only)
+![Slint logo](crates/nsf-presenter/assets/MadeWithSlint-logo-dark.svg#gh-dark-mode-only)
 
 ## Functionality
 
