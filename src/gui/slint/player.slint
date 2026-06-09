@@ -1,0 +1,297 @@
+import { Button, CheckBox, Slider, ListView, ScrollView } from "std-widgets.slint";
+
+export struct PlaylistRow {
+    display-name: string,
+    file-name: string,
+    track-index: int,
+}
+
+// Small, square icon-only button with hover/press feedback.
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 16px;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    background: primary
+        ? (touch.has-hover ? #3a7cd6 : #2563c4)
+        : (touch.pressed ? #353535 : (touch.has-hover ? #2a2a2a : transparent));
+
+    animate background { duration: 80ms; }
+
+    Image {
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        colorize: root.enabled ? #ffffff : #555555;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Minimal flat-button replacement for the toolbar (text label + hover).
+component FlatButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: 3px;
+    background: active
+        ? #2563c4
+        : (touch.pressed ? #353535 : (touch.has-hover ? #2a2a2a : transparent));
+    animate background { duration: 80ms; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.text;
+            color: root.enabled ? #ffffff : #555555;
+            vertical-alignment: center;
+            font-size: 12px;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component PlayerWindow inherits Window {
+    in property <bool> playing: false;
+    in-out property <bool> repeat-playlist: false;
+    in-out property <int> volume: 255;
+    in property <string> now-playing-text: "Nothing playing";
+    in property <[PlaylistRow]> playlist: [];
+    in property <int> current-track-index: -1;
+    in property <string> status-text: "";
+    in property <bool> visualization-visible: true;
+
+    callback open-files();
+    callback open-folder();
+    callback clear-playlist();
+    callback play-pause();
+    callback next-track();
+    callback prev-track();
+    callback play-index(int);
+    callback set-volume(int);
+    callback toggle-repeat(bool);
+    callback toggle-visualization();
+
+    title: "NSF Player";
+    icon: @image-url("nsf-presenter-icon.png");
+    preferred-width: 640px;
+    preferred-height: 600px;
+    min-width: 480px;
+    min-height: 420px;
+    background: #161616;
+
+    VerticalLayout {
+        spacing: 0;
+
+        // --- Top toolbar -------------------------------------------------
+        Rectangle {
+            height: 36px;
+            background: #1f1f1f;
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 2px;
+                alignment: start;
+
+                FlatButton {
+                    text: "Add files…";
+                    clicked => { root.open-files(); }
+                }
+                FlatButton {
+                    text: "Add folder…";
+                    clicked => { root.open-folder(); }
+                }
+                Rectangle { width: 1px; background: #2c2c2c; }
+                FlatButton {
+                    text: "Clear";
+                    clicked => { root.clear-playlist(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                FlatButton {
+                    text: "Visualization";
+                    active: root.visualization-visible;
+                    clicked => { root.toggle-visualization(); }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: #0a0a0a; }
+
+        // --- Transport bar (foobar-style: directly under the toolbar) ---
+        Rectangle {
+            height: 48px;
+            background: #1f1f1f;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 4px;
+
+                IconButton {
+                    icon: @image-url("prev.svg");
+                    clicked => { root.prev-track(); }
+                }
+                IconButton {
+                    icon: root.playing ? @image-url("pause.svg") : @image-url("play.svg");
+                    primary: true;
+                    clicked => { root.play-pause(); }
+                }
+                IconButton {
+                    icon: @image-url("next.svg");
+                    clicked => { root.next-track(); }
+                }
+
+                Rectangle { width: 16px; }
+
+                Image {
+                    width: 18px;
+                    height: 18px;
+                    source: @image-url("volume.svg");
+                    colorize: #aaaaaa;
+                    y: (parent.height - self.height) / 2;
+                }
+                Rectangle { width: 6px; }
+                Slider {
+                    width: 140px;
+                    minimum: 0;
+                    maximum: 255;
+                    value: root.volume;
+                    changed(v) => {
+                        root.volume = Math.round(v);
+                        root.set-volume(Math.round(v));
+                    }
+                }
+                Rectangle { width: 6px; }
+                Text {
+                    text: Math.round(root.volume / 2.55) + "%";
+                    vertical-alignment: center;
+                    color: #aaaaaa;
+                    font-size: 11px;
+                    width: 36px;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                CheckBox {
+                    text: "Repeat";
+                    checked <=> root.repeat-playlist;
+                    toggled => { root.toggle-repeat(self.checked); }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: #0a0a0a; }
+
+        // --- Now playing strip ------------------------------------------
+        Rectangle {
+            height: 26px;
+            background: #1c1c1c;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: root.now-playing-text;
+                    vertical-alignment: center;
+                    color: #e0e0e0;
+                    font-size: 12px;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: #0a0a0a; }
+
+        // --- Playlist (fills remaining space) ---------------------------
+        Rectangle {
+            vertical-stretch: 1;
+            background: #1a1a1a;
+
+            ListView {
+                for row[i] in root.playlist : Rectangle {
+                    height: 26px;
+                    background: i == root.current-track-index
+                        ? #2d5a8a
+                        : (touch.pressed ? #2a2a2a : (touch.has-hover ? #232323 : transparent));
+
+                    touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.play-index(i); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+
+                        Text {
+                            text: row.display-name;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            color: i == root.current-track-index ? #ffffff : #d4d4d4;
+                            horizontal-stretch: 1;
+                            font-size: 12px;
+                        }
+                        Text {
+                            text: row.file-name;
+                            vertical-alignment: center;
+                            color: i == root.current-track-index ? #cfdfff : #707070;
+                            font-size: 11px;
+                            overflow: elide;
+                            width: 160px;
+                        }
+                        Text {
+                            text: "#" + row.track-index;
+                            vertical-alignment: center;
+                            color: i == root.current-track-index ? #cfdfff : #707070;
+                            font-size: 11px;
+                            width: 28px;
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: #0a0a0a; }
+
+        // --- Status bar -------------------------------------------------
+        Rectangle {
+            height: 20px;
+            background: #141414;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: root.status-text;
+                    vertical-alignment: center;
+                    color: #707070;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+}

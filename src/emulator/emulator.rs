@@ -220,6 +220,26 @@ impl Emulator {
         while self.runtime.nes.ppu.current_scanline != 242 {
             self.dispatch(Event::NesRunScanline);
         }
+        self.end_frame();
+    }
+
+    /// Dispatch `count` PPU scanlines. Used by sub-frame stepping in the
+    /// player: the piano-roll updates internal musical state at APU
+    /// quarter-frame events (~240 Hz) regardless of when we call
+    /// `get_piano_roll_frame`, so by running a fraction of a frame's
+    /// scanlines and snapshotting between, we can extract intermediate
+    /// frames without distorting NES timing. Must be paired with one
+    /// `end_frame()` call per complete NES frame's worth of scanlines.
+    pub fn run_scanlines(&mut self, count: u32) {
+        for _ in 0..count {
+            self.dispatch(Event::NesRunScanline);
+        }
+    }
+
+    /// Dispatch the per-NES-frame Update event and run loop detection.
+    /// Call once after a complete NES frame's worth of scanlines (262 on
+    /// NTSC).
+    pub fn end_frame(&mut self) {
         self.dispatch(Event::Update);
 
         if let Some(position) = self.get_song_position() {
@@ -234,9 +254,9 @@ impl Emulator {
 
                 if self.loop_duration.is_none() {
                     let start_frame = self.song_positions.get(&position).cloned();
-                    let end_frame = Some(last_frame);
+                    let end_frame_val = Some(last_frame);
 
-                    self.loop_duration = match (start_frame, end_frame) {
+                    self.loop_duration = match (start_frame, end_frame_val) {
                         (Some(start), Some(end)) => {
                             if end - start >= 60 {
                                 Some((start as usize, (end - start) as usize))
@@ -254,6 +274,9 @@ impl Emulator {
             self.last_position = Some(position);
         }
     }
+
+    /// Total PPU scanlines per NTSC NES frame.
+    pub const NES_NTSC_SCANLINES_PER_FRAME: u32 = 262;
 
     pub fn set_piano_roll_size(&mut self, w: u32, h: u32) {
         self.dispatch(Event::ApplyIntegerSetting("piano_roll.canvas_width".to_string(), w as i64));
@@ -313,6 +336,26 @@ impl Emulator {
 
     pub fn clear_sample_buffer(&mut self) {
         self.sample_buffer.clear();
+    }
+
+    /// Drain every sample currently buffered in the APU plus the local sample
+    /// buffer. Used by real-time playback, where we push whatever's available
+    /// each frame instead of insisting on a fixed batch size.
+    pub fn drain_audio_samples(&mut self, volume_divisor: i16) -> Vec<i16> {
+        let new_samples: Vec<i16> = self.runtime.nes.apu.consume_samples();
+        self.sample_buffer.extend(new_samples);
+
+        let volume_divisor = match volume_divisor {
+            0 => 1,
+            v => v,
+        };
+
+        let count = self.sample_buffer.len();
+        self.sample_buffer
+            .drain(0..count)
+            .map(|s| s / volume_divisor)
+            .map(|s| s.saturating_add(s / 3))
+            .collect()
     }
 
     pub fn last_frame(&self) -> u32 {

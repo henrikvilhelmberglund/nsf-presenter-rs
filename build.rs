@@ -51,5 +51,11 @@ fn main() {
     compile("src/gui/slint/color-picker.slint");
     compile("src/gui/slint/channel-config.slint");
     compile("src/gui/slint/module-metadata.slint");
+    // player.slint and visualization.slint MUST come before main.slint so
+    // SLINT_INCLUDE_GENERATED ends up pointing at main.rs (consumed by
+    // slint::include_modules!()). The other generated .rs files are included
+    // explicitly in gui/mod.rs.
+    compile("src/gui/slint/player.slint");
+    compile("src/gui/slint/visualization.slint");
     compile("src/gui/slint/main.slint");
 }

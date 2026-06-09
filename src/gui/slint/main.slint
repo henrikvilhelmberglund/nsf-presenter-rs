@@ -15,6 +15,7 @@ export component MainWindow inherits Window {
     callback update-channel-configs(bool);
     callback start-render();
     callback cancel-render();
+    callback open-player();
 
     in property <string> version: "?";
     in property <string> rusticnes-version: "?";
@@ -216,6 +217,13 @@ export component MainWindow inherits Window {
             text: "NSFPresenter";
             font-size: 32px;
             horizontal-alignment: center;
+        }
+        HorizontalLayout {
+            alignment: center;
+            Button {
+                text: "Open player...";
+                clicked => { root.open-player(); }
+            }
         }
         HorizontalLayout {
             alignment: stretch;

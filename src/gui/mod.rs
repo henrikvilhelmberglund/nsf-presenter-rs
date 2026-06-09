@@ -1,4 +1,5 @@
 mod render_thread;
+mod player_window;
 
 use anyhow::{Result, Context};
 use slint;
@@ -19,6 +20,19 @@ use crate::gui::render_thread::{RenderThreadMessage, RenderThreadRequest};
 use crate::renderer::options::{FRAME_RATE, RendererOptions, StopCondition};
 
 slint::include_modules!();
+// player.slint and visualization.slint are compiled as separate top-levels so
+// each can expose its own Window component (slint_build only sets
+// SLINT_INCLUDE_GENERATED to the LAST compile()'s output; include_modules!()
+// above picks up main.rs). Each is scoped in a private module to avoid
+// colliding on shared names like `TextStyle`.
+mod player_slint {
+    include!(concat!(env!("OUT_DIR"), "/player.rs"));
+}
+mod visualization_slint {
+    include!(concat!(env!("OUT_DIR"), "/visualization.rs"));
+}
+pub use player_slint::{PlayerWindow, PlaylistRow};
+pub use visualization_slint::VisualizationWindow;
 
 // The return type looks wrong but it is not
 fn slint_string_arr<I>(a: I) -> slint::ModelRc<slint::SharedString>
@@ -666,6 +680,12 @@ pub fn run() {
             rt_tx.send(RenderThreadRequest::CancelRender).unwrap();
         });
     }
+
+    main_window.on_open_player(move || {
+        if let Err(e) = player_window::open_player_window() {
+            display_error_dialog(&format!("Failed to open player: {}", e));
+        }
+    });
 
     main_window.run().unwrap();
 

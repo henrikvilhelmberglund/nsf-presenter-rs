@@ -1,0 +1,19 @@
+export component VisualizationWindow inherits Window {
+    in property <image> visualization-frame;
+
+    title: "NSF Visualization";
+    icon: @image-url("nsf-presenter-icon.png");
+    preferred-width: 960px;
+    preferred-height: 540px;
+    min-width: 320px;
+    min-height: 180px;
+    background: black;
+
+    Image {
+        source: root.visualization-frame;
+        image-fit: contain;
+        width: parent.width;
+        height: parent.height;
+        image-rendering: pixelated;
+    }
+}
