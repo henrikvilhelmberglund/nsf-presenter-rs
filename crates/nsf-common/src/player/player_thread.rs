@@ -210,6 +210,13 @@ fn run<F, G>(
         // don't spin-wait. The blocking recv also resolves the
         // pause-deadlock: a Resume message naturally wakes us.
         loop {
+            // Bail out immediately if a previous message in this drain
+            // batch set `terminating` — otherwise a paused player would
+            // re-enter the blocking recv() below and hang the shutdown
+            // because no further messages are coming.
+            if terminating {
+                break;
+            }
             let active = current.is_some() && !paused;
             let msg = if active {
                 match rx.try_recv() {

@@ -44,7 +44,7 @@ impl PerspectiveRenderer {
         channels: &[&dyn AudioChannelState],
     ) -> &[u8] {
         clear(&mut self.buffer, [0x10, 0x10, 0x14, 0xFF]);
-        grid::draw_grid(&mut self.buffer);
+        grid::draw_grid(&mut self.buffer, piano_roll.disable_aa);
         notes::draw_notes(&mut self.buffer, piano_roll);
         keyboard::draw_keyboard(&mut self.buffer, piano_roll);
         channel_strip::draw_channel_strip(
@@ -76,6 +76,26 @@ pub(crate) fn put_pixel(buf: &mut [u8], x: i32, y: i32, rgba: [u8; 4]) {
     }
     let idx = ((y * PLAYER_CANVAS_W + x) * 4) as usize;
     buf[idx..idx + 4].copy_from_slice(&rgba);
+}
+
+/// Alpha-blend `rgba` (treated as opaque) onto the existing pixel with
+/// the given coverage in [0.0, 1.0]. Used by AA edge rasterizers when
+/// the user has anti-aliasing turned on.
+pub(crate) fn blend_pixel(buf: &mut [u8], x: i32, y: i32, rgba: [u8; 4], coverage: f32) {
+    if x < 0 || y < 0 || coverage <= 0.0 {
+        return;
+    }
+    let (x, y) = (x as u32, y as u32);
+    if x >= PLAYER_CANVAS_W || y >= PLAYER_CANVAS_H {
+        return;
+    }
+    let a = coverage.clamp(0.0, 1.0);
+    let inv = 1.0 - a;
+    let idx = ((y * PLAYER_CANVAS_W + x) * 4) as usize;
+    buf[idx] = (buf[idx] as f32 * inv + rgba[0] as f32 * a) as u8;
+    buf[idx + 1] = (buf[idx + 1] as f32 * inv + rgba[1] as f32 * a) as u8;
+    buf[idx + 2] = (buf[idx + 2] as f32 * inv + rgba[2] as f32 * a) as u8;
+    buf[idx + 3] = 0xFF;
 }
 
 /// Horizontal solid-color span (inclusive `x0`, exclusive `x1`).

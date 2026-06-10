@@ -20,7 +20,7 @@ use crate::visualization::perspective::transform::{
     y_above_horizon, y_at_depth, HIGHEST_KEY, HORIZON_Y, KEYBOARD_TOP_Y, LOWEST_KEY,
     NOISE_STRINGS,
 };
-use crate::visualization::perspective::hline;
+use crate::visualization::perspective::{blend_pixel, hline};
 
 /// How many recent slices we display. Sized for the larger of the two
 /// vertical regions (sky for Wave/Noise = HORIZON_Y pixels, or note
@@ -35,6 +35,7 @@ fn depth_capacity() -> usize {
 pub fn draw_notes(buf: &mut [u8], piano_roll: &PianoRollWindow) {
     let depth_cap = depth_capacity();
     let lowest_idx = piano_roll.lowest_index as i32;
+    let aa = !piano_roll.disable_aa;
 
     let slices: Vec<&Vec<ChannelSlice>> =
         piano_roll.time_slices.iter().take(depth_cap + 1).collect();
@@ -67,13 +68,29 @@ pub fn draw_notes(buf: &mut [u8], piano_roll: &PianoRollWindow) {
             if c.note_type != n.note_type {
                 continue;
             }
-            // Frequency / Noise: only connect chunks that share a lane.
-            // Waveform: `slice.y` is always 0 (no pitch axis), so
-            // consecutive visible slices always connect.
-            if !matches!(c.note_type, NoteType::Waveform) {
-                if c.y.round() as i32 != n.y.round() as i32 {
-                    continue;
+            // Connection criteria differ by note type:
+            //   - Frequency: connect when the float pitches are close
+            //     enough to be "the same note" — required for vibrato
+            //     that swings across a key boundary (e.g. 59.6 ↔ 60.6
+            //     round to different keys but the X math interpolates
+            //     smoothly so the connecting trapezoid is correct).
+            //     Threshold is tight enough that a real note-jump
+            //     between unrelated pitches still gets skipped.
+            //   - Noise: LFSR "strings" are discrete; require exact
+            //     same rounded string.
+            //   - Waveform: `slice.y` is always 0; always connect.
+            match c.note_type {
+                NoteType::Frequency => {
+                    if (c.y - n.y).abs() > 0.6 {
+                        continue;
+                    }
                 }
+                NoteType::Noise => {
+                    if c.y.round() as i32 != n.y.round() as i32 {
+                        continue;
+                    }
+                }
+                NoteType::Waveform => {}
             }
 
             let Some((cx_c, half_w_c)) = screen_pos(c, depth_curr, lowest_idx) else { continue };
@@ -87,6 +104,7 @@ pub fn draw_notes(buf: &mut [u8], piano_roll: &PianoRollWindow) {
                 y_next, cx_n - half_w_n, cx_n + half_w_n,
                 y_curr, cx_c - half_w_c, cx_c + half_w_c,
                 color_to_rgba(c.color),
+                aa,
             );
         }
     }
@@ -96,7 +114,15 @@ pub fn draw_notes(buf: &mut [u8], piano_roll: &PianoRollWindow) {
 /// Returns `None` if the note should be culled (e.g. Frequency note
 /// outside our key range).
 fn screen_pos(slice: &ChannelSlice, depth: f32, lowest_idx: i32) -> Option<(f32, f32)> {
-    let volume_factor = (slice.thickness * 0.5).clamp(0.05, 1.0);
+    // Match the classic view's `draw_slice_vert` width formula
+    // exactly: `full_width = thickness * lane_width / 2`, i.e.
+    // `half_width = thickness * lane_width / 4`. Thickness is
+    // `amplitude * 6`, so this scales linearly from ~0 (silent) up
+    // to 3 lane-widths (full-amplitude attack) — preserving the
+    // dynamic range that gives notes their attack-decay triangle
+    // shape in the classic view.
+    let thickness = slice.thickness.clamp(0.2, 6.0);
+    let half_w_factor = thickness * 0.25;
 
     match slice.note_type {
         NoteType::Frequency => {
@@ -112,7 +138,7 @@ fn screen_pos(slice: &ChannelSlice, depth: f32, lowest_idx: i32) -> Option<(f32,
             }
             let cx = lane_center_x_f(float_pitch, depth);
             let lane_w = lane_width_at_depth(depth);
-            Some((cx, lane_w * volume_factor * 0.5))
+            Some((cx, lane_w * half_w_factor))
         }
         NoteType::Noise => {
             // rusticnes maps LFSR rates onto 16 arbitrary "strings" in
@@ -122,7 +148,7 @@ fn screen_pos(slice: &ChannelSlice, depth: f32, lowest_idx: i32) -> Option<(f32,
             let string_idx = slice.y.clamp(0.0, (NOISE_STRINGS - 1) as f32);
             let cx = noise_lane_center_x_f(string_idx, depth);
             let lane_w = lane_width_at_depth(depth);
-            Some((cx, lane_w * volume_factor * 0.5))
+            Some((cx, lane_w * half_w_factor))
         }
         NoteType::Waveform => {
             // DPCM: no pitch axis. Falls down the dedicated waveform
@@ -155,11 +181,18 @@ fn y_for_slice(note_type: NoteType, depth: f32) -> f32 {
 /// passed in either screen-order — we auto-sort so floor lanes (where
 /// the newer slice sits lower on screen) and sky lanes (where the newer
 /// slice sits higher on screen) both render correctly.
+///
+/// When `aa` is true, the diagonal left/right edges are alpha-blended
+/// per-row using fractional pixel coverage (same approach as the
+/// classic view's `draw_slice_vert`). Top and bottom edges stay crisp
+/// — consecutive chunks share those edges, so AA there would
+/// double-blend at every chunk boundary.
 fn rasterize_trapezoid(
     buf: &mut [u8],
     y_a: f32, a_left_x: f32, a_right_x: f32,
     y_b: f32, b_left_x: f32, b_right_x: f32,
     color: [u8; 4],
+    aa: bool,
 ) {
     let (y_top, top_left_x, top_right_x, y_bot, bot_left_x, bot_right_x) = if y_a <= y_b {
         (y_a, a_left_x, a_right_x, y_b, b_left_x, b_right_x)
@@ -172,18 +205,67 @@ fn rasterize_trapezoid(
     if y1 <= y0 {
         // Degenerate — draw a single row at y0 so the chunk stays
         // visible even where slices stack tightly (e.g. at the horizon).
-        let lx = top_left_x.min(bot_left_x).round() as i32;
-        let rx = top_right_x.max(bot_right_x).round() as i32 + 1;
-        hline(buf, y0, lx, rx, color);
+        // Use the *average* of top/bottom X so neighboring degenerate
+        // chunks blend into each other instead of stair-stepping, and
+        // AA the edges when AA is on so the row's left/right pixels
+        // match the smooth blending the multi-row path produces.
+        let lx_f = (top_left_x + bot_left_x) * 0.5;
+        let rx_f = (top_right_x + bot_right_x) * 0.5;
+        if aa {
+            fill_row_aa(buf, y0, lx_f, rx_f, color);
+        } else {
+            let lx = lx_f.round() as i32;
+            let rx = rx_f.round() as i32 + 1;
+            hline(buf, y0, lx, rx, color);
+        }
         return;
     }
 
     let dy = (y1 - y0) as f32;
     for y in y0..=y1 {
         let t = (y - y0) as f32 / dy;
-        let lx = lerp(top_left_x, bot_left_x, t).round() as i32;
-        let rx = lerp(top_right_x, bot_right_x, t).round() as i32 + 1;
-        hline(buf, y, lx, rx, color);
+        let lx_f = lerp(top_left_x, bot_left_x, t);
+        let rx_f = lerp(top_right_x, bot_right_x, t);
+        if aa {
+            fill_row_aa(buf, y, lx_f, rx_f, color);
+        } else {
+            // Snap to integer columns. `+1` makes the right edge
+            // inclusive so a note of nominal width N renders as
+            // exactly N pixels regardless of fractional position.
+            let lx = lx_f.round() as i32;
+            let rx = rx_f.round() as i32 + 1;
+            hline(buf, y, lx, rx, color);
+        }
+    }
+}
+
+/// AA-fill one scanline of a trapezoid: solid interior columns plus
+/// alpha-blended left and right edge pixels weighted by fractional
+/// coverage. Mirrors classic's `draw_slice_vert` AA path.
+fn fill_row_aa(buf: &mut [u8], y: i32, lx_f: f32, rx_f: f32, color: [u8; 4]) {
+    if rx_f <= lx_f {
+        return;
+    }
+    let lx_floor = lx_f.floor();
+    let rx_floor = rx_f.floor();
+    if lx_floor == rx_floor {
+        // Sub-pixel row: edges fall in the same column, alpha is the
+        // width of the covered region within that pixel.
+        let cov = rx_f - lx_f;
+        blend_pixel(buf, lx_floor as i32, y, color, cov);
+        return;
+    }
+    // Left edge: pixel `floor(lx_f)` is covered from `frac(lx_f)` to 1.0.
+    let left_cov = 1.0 - (lx_f - lx_floor);
+    blend_pixel(buf, lx_floor as i32, y, color, left_cov);
+    // Right edge: pixel `floor(rx_f)` is covered from 0 to `frac(rx_f)`.
+    let right_cov = rx_f - rx_floor;
+    blend_pixel(buf, rx_floor as i32, y, color, right_cov);
+    // Solid interior between the two edge pixels.
+    let interior_start = lx_floor as i32 + 1;
+    let interior_end = rx_floor as i32;
+    if interior_end > interior_start {
+        hline(buf, y, interior_start, interior_end, color);
     }
 }
 
