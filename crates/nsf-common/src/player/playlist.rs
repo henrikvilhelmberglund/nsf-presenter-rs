@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::fs;
 use crate::emulator::{m3u_searcher, Nsf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaylistItem {
     pub file_path: PathBuf,
     /// 1-indexed NSF subsong (matches `Emulator::select_track`).
@@ -38,6 +39,14 @@ impl Playlist {
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.current = None;
+    }
+
+    /// Replace the playlist's items wholesale — used by config-restore
+    /// to rehydrate a saved playlist on startup without re-reading the
+    /// NSF files (we already saved every PlaylistItem's metadata).
+    pub fn set_items(&mut self, items: Vec<PlaylistItem>) {
+        self.items = items;
         self.current = None;
     }
 

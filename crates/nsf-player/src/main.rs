@@ -3,6 +3,7 @@
 // seen; use the in-window status bar for user-facing info.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod config;
 mod gui;
 
 use build_time::build_time_utc;

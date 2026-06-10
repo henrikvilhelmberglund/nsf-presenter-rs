@@ -34,11 +34,21 @@ pub enum PlayerRequest {
     /// Enable or disable anti-aliased note rendering. Persists across
     /// track loads; default is `false` (crisp pixel edges).
     SetAntiAliasing(bool),
-    /// When true, the current track loops forever (TrackEnded never
-    /// fires from loop detection). When false (default), the track ends
-    /// after one detected loop and the GUI advances the playlist.
-    SetRepeatTrack(bool),
+    /// Switch the visualization view mode. Default is `Classic`.
+    SetViewMode(ViewMode),
     Terminate,
+}
+
+/// Visualization mode selected from the GUI. Affects which renderer the
+/// player thread invokes between emulator steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    /// The classic 2D scrolling piano-roll rendered by
+    /// `rusticnes-ui-common::PianoRollWindow`.
+    Classic,
+    /// A perspective / 3D-style view with notes falling from a horizon
+    /// toward a piano keyboard at the bottom of the canvas.
+    Perspective,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +150,20 @@ struct PlaybackState {
     emulator: Emulator,
     item: PlaylistItem,
     loaded_file: PathBuf,
+    /// Set true once any APU channel reports `playing()` — guards
+    /// against ending tracks during a silent intro.
+    audio_heard: bool,
+    /// Consecutive NES frames where every channel reports `!playing()`.
+    /// Fallback end-detector for non-FT NSFs (which have no song
+    /// position to watch); uses a long threshold so musical pauses
+    /// don't false-trigger.
+    silent_frames: u32,
+    /// Last seen FT song position. Used to detect "position stopped
+    /// advancing" — a cleaner end signal for FT NSFs than silence
+    /// since the position pointer keeps moving during musical rests.
+    last_song_position: Option<crate::emulator::SongPosition>,
+    /// Consecutive frames the FT song position has been unchanged.
+    position_stall_frames: u32,
 }
 
 fn run<F, G>(
@@ -159,9 +183,9 @@ fn run<F, G>(
     let mut volume: u8 = 255;
     // Default: AA off (crisp pixel edges). Persists across track changes.
     let mut anti_aliasing: bool = false;
-    // Default: track ends after one detected loop (the GUI then advances
-    // the playlist). When true, the track loops indefinitely.
-    let mut repeat_track: bool = false;
+    let mut view_mode: ViewMode = ViewMode::Classic;
+    let mut perspective_renderer =
+        crate::visualization::perspective::PerspectiveRenderer::new();
     let mut terminating = false;
 
     // Sub-frame stepping: produce one visual sub-frame per SUBFRAME_PERIOD
@@ -297,8 +321,8 @@ fn run<F, G>(
                         state.emulator.set_disable_aa(!enabled);
                     }
                 }
-                PlayerRequest::SetRepeatTrack(enabled) => {
-                    repeat_track = enabled;
+                PlayerRequest::SetViewMode(mode) => {
+                    view_mode = mode;
                 }
                 PlayerRequest::Terminate => {
                     feed.audio_expected.store(false, Ordering::Relaxed);
@@ -341,7 +365,20 @@ fn run<F, G>(
             };
             state.emulator.run_scanlines(scanlines);
 
-            let frame = state.emulator.get_piano_roll_frame();
+            let frame = match view_mode {
+                ViewMode::Classic => state.emulator.get_piano_roll_frame(),
+                ViewMode::Perspective => {
+                    // Force the piano-roll's internal canvas to refresh so
+                    // its time_slices reflect the latest sub-step, then
+                    // feed both the piano roll and the full channel list
+                    // (for the bottom oscilloscope strip) to the renderer.
+                    let _ = state.emulator.get_piano_roll_frame();
+                    let channels = state.emulator.channels();
+                    perspective_renderer
+                        .render(state.emulator.piano_roll_window(), &channels)
+                        .to_vec()
+                }
+            };
             latest_frame.store(Arc::new(frame));
             on_new_frame();
         }
@@ -358,9 +395,40 @@ fn run<F, G>(
             push_samples(&mut feed, &samples, volume);
         }
 
-        // Crude end-of-track: stop on song end (Cxx) for FT-based drivers, or when an
-        // NSFe duration was provided and we've passed it.
-        if track_ended(&state.emulator, &state.item, repeat_track) {
+        // Update the silence tracker — any channel reporting `playing()`
+        // resets the counter, otherwise it accumulates one frame at a
+        // time. Only starts counting once we've heard at least one
+        // playing frame, so silent intros don't end the track.
+        let any_playing = state.emulator.channels().iter().any(|ch| ch.playing());
+        if any_playing {
+            state.audio_heard = true;
+            state.silent_frames = 0;
+        } else if state.audio_heard {
+            state.silent_frames = state.silent_frames.saturating_add(1);
+        }
+
+        // Update FT song-position stall tracker. For FT-detected NSFs
+        // the position pointer keeps advancing through the song data
+        // even during musical rests — so "position hasn't moved for a
+        // while" is a much cleaner end signal than silence detection.
+        let current_position = state.emulator.get_song_position();
+        if current_position.is_some() && current_position == state.last_song_position {
+            state.position_stall_frames = state.position_stall_frames.saturating_add(1);
+        } else {
+            state.position_stall_frames = 0;
+            state.last_song_position = current_position;
+        }
+
+        // End-of-track: FT Cxx, NSFe duration, FT loop detection, FT
+        // position stall, or (non-FT only) sustained silence.
+        let is_ft = state.emulator.get_song_position().is_some();
+        if track_ended(
+            &state.emulator,
+            &state.item,
+            state.silent_frames,
+            state.position_stall_frames,
+            is_ft,
+        ) {
             event_cb(PlayerEvent::TrackEnded);
             current = None;
             feed.audio_expected.store(false, Ordering::Relaxed);
@@ -437,31 +505,55 @@ fn prefill(emulator: &mut Emulator, feed: &mut AudioFeed, volume: u8, target_ms:
     }
 }
 
-fn track_ended(emulator: &Emulator, item: &PlaylistItem, repeat_track: bool) -> bool {
-    // Always-on end conditions: an explicit driver end marker (Cxx in
-    // FamiTracker) and the NSFe/M3U duration. These represent "the song
-    // really ended" and override the repeat flag.
+/// ~5 s at the NES NTSC frame rate. Fallback end-detector for non-FT
+/// NSFs (no song position to watch). Long enough that musical rests
+/// don't false-trigger, short enough that short non-looping jingles
+/// don't sit silent forever.
+const SILENT_FRAMES_TO_END: u32 = 300;
+
+/// ~2 s. For FT NSFs the song-position pointer keeps advancing through
+/// the song data even during rests; only when the music genuinely
+/// stops does the position freeze. So a shorter threshold is fine here
+/// without false-triggering on musical pauses.
+const POSITION_STALL_FRAMES_TO_END: u32 = 120;
+
+fn track_ended(
+    emulator: &Emulator,
+    item: &PlaylistItem,
+    silent_frames: u32,
+    position_stall_frames: u32,
+    is_ft: bool,
+) -> bool {
+    // Driver-level end marker (Cxx for FamiTracker).
     if let Some(pos) = emulator.get_song_position() {
         if pos.end {
             return true;
         }
     }
+    // Explicit duration from NSFe / M3U metadata.
     if let Some(secs) = item.duration_seconds {
         let frames = (secs as f64 * crate::emulator::NES_NTSC_FRAMERATE) as u64;
         if emulator.last_frame() as u64 > frames {
             return true;
         }
     }
-
-    // Loop-based end: after the FT loop detector has seen the song repeat
-    // once, advance to the next playlist track — unless the user wants
-    // the current track to loop indefinitely.
-    if !repeat_track {
-        if let Some(count) = emulator.loop_count() {
-            if count >= 1 {
-                return true;
-            }
+    // Loop-based end: after the FT loop detector has seen the song
+    // repeat once, end the track so the GUI can advance the playlist.
+    if let Some(count) = emulator.loop_count() {
+        if count >= 1 {
+            return true;
         }
+    }
+    if is_ft {
+        // FT NSF: position-stall is the cleaner end signal — the song
+        // pointer keeps moving during rests, so it only freezes once
+        // the song data actually runs out.
+        if position_stall_frames >= POSITION_STALL_FRAMES_TO_END {
+            return true;
+        }
+    } else if silent_frames >= SILENT_FRAMES_TO_END {
+        // Non-FT NSF: no position to watch, fall back to long-silence.
+        return true;
     }
 
     false
@@ -494,6 +586,10 @@ fn load_track(item: &PlaylistItem, sample_rate: u32) -> Result<PlaybackState> {
         emulator,
         item: item.clone(),
         loaded_file: item.file_path.clone(),
+        audio_heard: false,
+        silent_frames: 0,
+        last_song_position: None,
+        position_stall_frames: 0,
     })
 }
 

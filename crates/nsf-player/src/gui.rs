@@ -13,9 +13,11 @@ use std::time::Duration;
 
 use nsf_common::player::player_thread::{
     blank_frame, spawn as spawn_player, LatestFrame, PlayerEvent, PlayerHandle, PlayerRequest,
-    PLAYER_CANVAS_H, PLAYER_CANVAS_W,
+    ViewMode, PLAYER_CANVAS_H, PLAYER_CANVAS_W,
 };
 use nsf_common::player::playlist::{Playlist, PlaylistItem};
+
+use crate::config::Config;
 
 // `slint::include_modules!()` picks up the *last* compile()'d slint file via
 // SLINT_INCLUDE_GENERATED — that's visualization.slint per build.rs. The other
@@ -34,9 +36,39 @@ pub fn run() {
 }
 
 fn open_player_window() -> Result<()> {
+    let config = Config::load();
+
     let player_w = PlayerWindow::new().context("Failed to create PlayerWindow")?;
     let viz_w = VisualizationWindow::new().context("Failed to create VisualizationWindow")?;
-    let state = Rc::new(RefCell::new(PlayerWindowState::new(viz_w.as_weak())?));
+
+    // Apply persisted settings to the Slint window properties BEFORE
+    // any user interaction. These take effect on show() so the UI
+    // reflects the saved state immediately.
+    player_w.set_view_mode(config.view_mode);
+    player_w.set_scale_mode(config.scale_mode);
+    player_w.set_anti_aliasing(config.anti_aliasing);
+    player_w.set_volume(config.volume);
+    player_w.set_repeat_playlist(config.repeat);
+
+    let state = Rc::new(RefCell::new(PlayerWindowState::new(viz_w.as_weak(), config)?));
+
+    // Push the rehydrated playlist into the UI and mirror the persisted
+    // settings to the player thread (the player thread starts with
+    // hardcoded defaults; without these sends the audio / view-mode /
+    // AA state wouldn't match what the UI now claims).
+    {
+        let mut s = state.borrow_mut();
+        // Repeat is a playlist-level concern (wrap-around at end of
+        // playlist), not a player-thread one — set it directly here.
+        s.playlist.repeat = s.config.repeat;
+        sync_playlist_to_ui(&player_w, &s.playlist);
+        s.send(PlayerRequest::SetVolume(s.config.volume.clamp(0, 255) as u8));
+        s.send(PlayerRequest::SetAntiAliasing(s.config.anti_aliasing));
+        s.send(PlayerRequest::SetViewMode(match s.config.view_mode {
+            1 => ViewMode::Perspective,
+            _ => ViewMode::Classic,
+        }));
+    }
 
     wire_callbacks(&player_w, &state);
     install_status_timer(&player_w, &state);
@@ -77,10 +109,13 @@ fn open_player_window() -> Result<()> {
     let player_y: f32 = 100.0;
     let player_w_size: f32 = 640.0;
     let player_h_size: f32 = 620.0;
-    // Default scale mode is 2x — match the size so the canvas renders
-    // pixel-perfect from startup, not letterboxed.
-    let viz_w_size: f32 = 1920.0;
-    let viz_h_size: f32 = 1080.0;
+    // Initial viz size honors the persisted scale_mode so a saved 1x
+    // launches at 960×540 instead of being letterboxed inside 1920×1080.
+    let saved_scale = state.borrow().config.scale_mode;
+    let (viz_w_size, viz_h_size): (f32, f32) = match saved_scale {
+        1 => (960.0, 540.0),
+        _ => (1920.0, 1080.0),
+    };
     let gap: f32 = 12.0;
 
     player_w.show().context("Failed to show player window")?;
@@ -116,10 +151,15 @@ struct PlayerWindowState {
     viz_weak: Weak<VisualizationWindow>,
     visualization_visible: bool,
     event_queue: Arc<Mutex<Vec<PlayerEvent>>>,
+    /// Persisted UI/playback state. Mutated by callbacks and flushed
+    /// to disk via `save_config`. Holds a snapshot of every setting
+    /// we round-trip (playlist contents, view mode, scale, AA, volume,
+    /// repeat) — anything not in here doesn't persist across launches.
+    config: Config,
 }
 
 impl PlayerWindowState {
-    fn new(viz_weak: Weak<VisualizationWindow>) -> Result<Self> {
+    fn new(viz_weak: Weak<VisualizationWindow>, config: Config) -> Result<Self> {
         let event_queue: Arc<Mutex<Vec<PlayerEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let event_queue_thread = event_queue.clone();
 
@@ -154,12 +194,18 @@ impl PlayerWindowState {
         )
         .context("Failed to start player thread")?;
 
+        let mut playlist = Playlist::new();
+        if !config.playlist.is_empty() {
+            playlist.set_items(config.playlist.clone());
+        }
+
         Ok(Self {
             player: Some(player),
-            playlist: Playlist::new(),
+            playlist,
             viz_weak,
             visualization_visible: true,
             event_queue,
+            config,
         })
     }
 
@@ -172,6 +218,21 @@ impl PlayerWindowState {
     fn send(&self, req: PlayerRequest) {
         if let Some(p) = &self.player {
             let _ = p.tx.send(req);
+        }
+    }
+
+    /// Snapshot the current playlist into `self.config` and persist to
+    /// disk. Call after any playlist mutation (append / clear).
+    fn save_playlist(&mut self) {
+        self.config.playlist = self.playlist.items().to_vec();
+        self.flush_config();
+    }
+
+    /// Persist `self.config` to disk. Errors are logged but don't
+    /// propagate — losing persistence shouldn't take down the player.
+    fn flush_config(&self) {
+        if let Err(e) = self.config.save() {
+            eprintln!("Failed to save config.toml: {}", e);
         }
     }
 }
@@ -201,6 +262,7 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
             }
             sync_playlist_to_ui(&weak.unwrap(), &state.borrow().playlist);
             push_playlist_to_thread(&state.borrow());
+            state.borrow_mut().save_playlist();
             if started_empty && !state.borrow().playlist.is_empty() {
                 let first = state.borrow_mut().playlist.select(0);
                 if let Some(first) = first {
@@ -225,6 +287,7 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
             }
             sync_playlist_to_ui(&weak.unwrap(), &state.borrow().playlist);
             push_playlist_to_thread(&state.borrow());
+            state.borrow_mut().save_playlist();
             if started_empty && !state.borrow().playlist.is_empty() {
                 let first = state.borrow_mut().playlist.select(0);
                 if let Some(first) = first {
@@ -242,6 +305,7 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
             state.borrow_mut().playlist.clear();
             sync_playlist_to_ui(&weak.unwrap(), &state.borrow().playlist);
             push_playlist_to_thread(&state.borrow());
+            state.borrow_mut().save_playlist();
         });
     }
 
@@ -301,29 +365,57 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
     {
         let state = state.clone();
         window.on_set_volume(move |v| {
-            let v = v.clamp(0, 255) as u8;
-            state.borrow().send(PlayerRequest::SetVolume(v));
+            let clamped = v.clamp(0, 255);
+            let mut s = state.borrow_mut();
+            s.send(PlayerRequest::SetVolume(clamped as u8));
+            s.config.volume = clamped;
+            s.flush_config();
         });
     }
 
     {
         let state = state.clone();
         window.on_toggle_repeat(move |checked| {
-            state.borrow().send(PlayerRequest::SetRepeatTrack(checked));
+            let mut s = state.borrow_mut();
+            // Playlist-level repeat: wrap to track 0 when the last
+            // track ends. The player thread keeps auto-ending tracks
+            // via loop detection regardless; this just controls what
+            // `Playlist::advance` returns at the end of the list.
+            s.playlist.repeat = checked;
+            s.config.repeat = checked;
+            s.flush_config();
         });
     }
 
     {
         let state = state.clone();
         window.on_set_anti_aliasing(move |on| {
-            state.borrow().send(PlayerRequest::SetAntiAliasing(on));
+            let mut s = state.borrow_mut();
+            s.send(PlayerRequest::SetAntiAliasing(on));
+            s.config.anti_aliasing = on;
+            s.flush_config();
+        });
+    }
+
+    {
+        let state = state.clone();
+        window.on_set_view_mode(move |mode| {
+            let vm = match mode {
+                1 => ViewMode::Perspective,
+                _ => ViewMode::Classic,
+            };
+            let mut s = state.borrow_mut();
+            s.send(PlayerRequest::SetViewMode(vm));
+            s.config.view_mode = mode;
+            s.flush_config();
         });
     }
 
     {
         let state = state.clone();
         window.on_set_scale_mode(move |mode| {
-            if let Some(viz) = state.borrow().viz_weak.upgrade() {
+            let mut s = state.borrow_mut();
+            if let Some(viz) = s.viz_weak.upgrade() {
                 viz.set_scale_mode(mode);
                 // 1x and 2x snap the viz window to exact pixel sizes so the
                 // user actually sees the canvas at that resolution instead
@@ -343,6 +435,8 @@ fn wire_callbacks(window: &PlayerWindow, state: &Rc<RefCell<PlayerWindowState>>)
                     _ => {}
                 }
             }
+            s.config.scale_mode = mode;
+            s.flush_config();
         });
     }
 

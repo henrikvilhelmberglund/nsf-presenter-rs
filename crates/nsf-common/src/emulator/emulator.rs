@@ -7,7 +7,7 @@ use std::fs;
 use std::str;
 use std::rc::Rc;
 use anyhow::{Result, Context};
-use rusticnes_core::apu::FilterType;
+use rusticnes_core::apu::{AudioChannelState, FilterType};
 use rusticnes_ui_common::application::RuntimeState as RusticNESRuntimeState;
 use rusticnes_ui_common::events::Event;
 use rusticnes_ui_common::panel::Panel;
@@ -69,6 +69,25 @@ impl Emulator {
     /// crisp pixel-art rendering.
     pub fn set_disable_aa(&mut self, disabled: bool) {
         self.piano_roll_window.disable_aa = disabled;
+    }
+
+    /// Read-only access to the piano-roll window — exposes the time-slice
+    /// deque + channel state so alternative renderers (e.g. the
+    /// perspective view in nsf-player) can consume the same musical data
+    /// the classic 2D view does.
+    pub fn piano_roll_window(&self) -> &PianoRollWindow {
+        &self.piano_roll_window
+    }
+
+    /// All currently active audio channels (2A03 + any mapper-provided
+    /// expansion chips + the final mix). Used by the perspective view's
+    /// per-channel oscilloscope strip to draw the same set of channels
+    /// the classic view's channel headers show.
+    pub fn channels(&self) -> Vec<&dyn AudioChannelState> {
+        let mut channels: Vec<&dyn AudioChannelState> = Vec::new();
+        channels.extend(self.runtime.nes.apu.channels());
+        channels.extend(self.runtime.nes.mapper.channels());
+        channels
     }
 
     pub fn driver_type(&self) -> NsfDriverType {

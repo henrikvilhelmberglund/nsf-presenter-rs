@@ -3152,8 +3152,10 @@ dependencies = [
  "build-time",
  "native-dialog",
  "nsf-common",
+ "serde",
  "slint",
  "slint-build",
+ "toml 0.8.8",
  "winres",
 ]
 
